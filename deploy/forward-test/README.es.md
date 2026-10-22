@@ -36,7 +36,9 @@ compartidas antes de desplegar.
 1. En un proyecto/entorno de pruebas, añade una aplicación desde el repositorio
    propio de GitHub y selecciona la rama que contiene el cambio revisado.
 2. Elige **Docker Compose** como estrategia de construcción. Usa **Base Directory**
-   `/` y **Docker Compose Location** `/deploy/forward-test/compose.yaml`.
+   `/deploy/forward-test` y **Docker Compose Location** `/compose.yaml`.
+   Coolify usa la carpeta base como `--project-directory`; así `build.context: ../..`
+   apunta a la raíz del repositorio y encuentra el código y el Dockerfile dedicado.
 3. Guarda y carga la definición. En las variables de este recurso crea los valores
    de `.env.example`: URL y tres secretos nuevos. Los campos con `${VARIABLE:?}`
    son obligatorios; no despliegues con los campos vacíos. Genera cada secreto por
@@ -60,6 +62,20 @@ compartidas antes de desplegar.
 `FORWARD_TEST_SOURCE_REVISION` es una etiqueta opcional para identificar el commit
 personalizado; no descarga ni cambia el código. Coolify construye la rama/commit
 seleccionado en la aplicación. Selecciona el commit revisado antes de desplegar.
+
+### Si aparece `dokploy-network` o `No services to build`
+
+Esas líneas junto con la descarga de `evoapicloud/evolution-api:latest` indican
+que se cargó el `docker-compose.yaml` raíz heredado. Ese archivo utiliza una imagen
+preconstruida y no incorpora este reenvío. Revisa los dos campos del paso 2, guarda
+y vuelve a cargar la definición del repositorio. Deben aparecer exactamente
+`api`, `postgres` y `redis`; `api` debe tener una sección `build:`. No deben aparecer
+`frontend`, `dokploy-network` ni una imagen `latest` de Evolution.
+
+Crear la red externa no corrige la selección del Compose. Las instrucciones
+anteriores con Base Directory `/` y el Compose anidado también necesitaban este
+ajuste: su contexto `../..` se resolvería fuera del checkout en Coolify.
+Consulta la [prueba oficial de contextos sobre la carpeta base](https://github.com/coollabsio/coolify/blob/main/tests/Feature/ComposeBuildContextDeploymentTest.php).
 
 ## Sesión y datos de prueba
 
