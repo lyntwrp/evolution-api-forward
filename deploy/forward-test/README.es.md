@@ -77,6 +77,26 @@ anteriores con Base Directory `/` y el Compose anidado también necesitaban este
 ajuste: su contexto `../..` se resolvería fuera del checkout en Coolify.
 Consulta la [prueba oficial de contextos sobre la carpeta base](https://github.com/coollabsio/coolify/blob/main/tests/Feature/ComposeBuildContextDeploymentTest.php).
 
+### Si la construcción falla con `JavaScript heap out of memory`
+
+El despliegue de prueba del 22 de octubre pasó instalación, Prisma y TypeScript,
+pero agotó el heap de Node al empaquetar todas las entradas de `src` en CJS y ESM.
+El Dockerfile dedicado ahora comprueba todo TypeScript y empaqueta solamente
+`src/main.ts` en CJS, que es lo que ejecuta `node dist/main`. No genera mapas de
+fuente para esa imagen; conserva los loaders, la minificación y la copia de
+traducciones de la configuración oficial. Los imports internos quedan incluidos
+en el bundle principal; las dependencias externas siguen instaladas normalmente.
+
+Este cambio solo afecta al empaquetado de la imagen de pruebas: no modifica
+`src`, `package.json`, el lockfile ni `tsup.config.ts`. No añade un límite de memoria
+al proceso en ejecución ni cambia los datos o volúmenes.
+
+Actualiza la rama seleccionada y ejecuta un nuevo Deploy para obtener esta
+corrección. No es necesario vaciar los volúmenes ni desactivar la caché. Si el
+servidor sigue matando el proceso por falta de memoria total, habrá que revisar
+los recursos disponibles para la construcción; aumentar el límite del heap por
+sí solo no crea RAM.
+
 ## Sesión y datos de prueba
 
 Abre `/manager` en el dominio nuevo y utiliza la API key nueva, o crea la instancia

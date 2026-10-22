@@ -62,3 +62,28 @@ El Compose mantiene credenciales vacías hasta que el operador cree secretos nue
 No se ha alterado ni desplegado la instancia de producción. El fork y sus pruebas
 no certifican seguridad: conserva la vulnerabilidad conocida de Baileys y otros
 avisos de la base oficial solicitada.
+
+## Ajuste del empaquetado por memoria
+
+El registro de construcción compartido por el usuario el 22 de octubre muestra
+que la instalación, Prisma y TypeScript terminan, pero tsup agota el heap de Node
+cerca de 954 MiB al generar múltiples entradas CJS/ESM con mapas de fuente.
+
+Se ajustó exclusivamente el Dockerfile del laboratorio para ejecutar:
+
+```bash
+npm exec --no -- tsc --noEmit
+npm exec --no -- tsup src/main.ts --format cjs --no-sourcemap
+```
+
+Los dos pasos se ejecutaron localmente con
+`NODE_OPTIONS=--max-old-space-size=512` y terminaron correctamente. Se comprobó la
+sintaxis de `dist/main.js`, la presencia de `forwardMessage`, las tres traducciones
+y la ausencia de ESM/mapas de fuente adicionales. El límite corresponde al heap
+V8; no es una medición del consumo total de RAM del proceso o de Docker.
+
+La configuración oficial de tsup, sus loaders y su copia de traducciones se
+conservan. `src`, dependencias, lockfile y Prisma siguen intactos respecto a la
+implementación revisada. No se inició el bundle ni se accedió a producción para
+esta comprobación. La construcción Linux y el arranque corregidos se deben
+confirmar en el siguiente despliegue de pruebas.

@@ -20,7 +20,10 @@ COPY manager ./manager
 RUN DATABASE_PROVIDER=postgresql \
     DATABASE_CONNECTION_URI=postgresql://build:build@localhost:5432/build \
     npm run db:generate
-RUN npm run build
+# The server runs dist/main.js; avoid separately bundling every module in CJS and ESM.
+# CLI overrides retain the official loaders and translation-copy hook.
+RUN npm exec --no -- tsc --noEmit \
+    && npm exec --no -- tsup src/main.ts --format cjs --no-sourcemap
 
 FROM node:24-alpine AS final
 
