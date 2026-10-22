@@ -1,0 +1,74 @@
+{
+  "name": "forwardMessage — solo pruebas",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Run once for all items. Input: one { groupJid, messageId } item per test destination.\nconst baseUrl = 'https://evolution-forward-test.example.com';\nconst instanceName = 'forward-lab';\n\nreturn $input.all().map((item, index) => {\n  const { groupJid, messageId } = item.json;\n  if (typeof groupJid !== 'string' || !/^[0-9]+(?:-[0-9]+)?@g\\.us$/.test(groupJid)) {\n    throw new Error('groupJid must be the full test group JID ending in @g.us');\n  }\n  if (typeof messageId !== 'string' || !/^\\S{1,200}$/.test(messageId)) {\n    throw new Error('messageId must come from data.key.id in the test instance webhook');\n  }\n  return {\n    json: {\n      url: baseUrl.replace(/\\/$/, '') + '/message/forwardMessage/' + encodeURIComponent(instanceName),\n      body: { number: groupJid, messageId },\n    },\n    pairedItem: { item: index },\n  };\n});"
+      },
+      "id": "prepare-forward-test",
+      "name": "Preparar reenvío (prueba)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Entrada: un item con groupJid y messageId del webhook de PRUEBAS. Cambia dominio y nombre de instancia. No conectar a producción."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "publish-forward-test",
+      "name": "Publicar reenvío (prueba)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        0
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Selecciona una NUEVA credencial Header Auth: apikey, API key de prueba. Sin secretos incluidos. Considera éxito solo statusCode === 201. No activar reintentos automáticos."
+    }
+  ],
+  "connections": {
+    "Preparar reenvío (prueba)": {
+      "main": [
+        [
+          {
+            "node": "Publicar reenvío (prueba)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

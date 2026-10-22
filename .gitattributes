@@ -1,0 +1,5 @@
+# Keep downloaded audit evidence byte-for-byte; it is not executable source.
+docs/audit/pr-2595.diff -text -diff
+docs/audit/npm-audit.json -text -diff
+deploy/forward-test/Dockerfile text eol=lf
+deploy/forward-test/Dockerfile.dockerignore text eol=lf

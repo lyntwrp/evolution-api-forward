@@ -1,0 +1,16 @@
+# Allow only the files required by this build into its context.
+# Exclude all deployment .env files, sessions, local dependencies, and Git metadata.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsup.config.ts
+!runWithProvider.js
+!src
+!src/**
+!prisma
+!prisma/**
+!public
+!public/**
+!manager
+!manager/**

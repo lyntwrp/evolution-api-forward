@@ -25,6 +25,22 @@ const numberDefinition: JSONSchema7Definition = {
   description: 'Invalid format',
 };
 
+export const forwardMessageSchema: JSONSchema7 = {
+  $id: v4(),
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    number: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 80,
+      pattern: '^(?:[0-9]{1,17}|[0-9]+(?:-[0-9]+)?@g\\.us|[0-9]+@s\\.whatsapp\\.net)$',
+    },
+    messageId: { type: 'string', minLength: 1, maxLength: 200, pattern: '^\\S+$' },
+  },
+  required: ['number', 'messageId'],
+};
+
 export const templateMessageSchema: JSONSchema7 = {
   $id: v4(),
   type: 'object',

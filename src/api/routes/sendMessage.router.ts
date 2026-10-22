@@ -1,5 +1,6 @@
 import { RouterBroker } from '@api/abstract/abstract.router';
 import {
+  ForwardMessageDto,
   SendAudioDto,
   SendButtonsDto,
   SendContactDto,
@@ -15,10 +16,12 @@ import {
   SendTextDto,
 } from '@api/dto/sendMessage.dto';
 import { sendMessageController } from '@api/server.module';
+import { BadRequestException } from '@exceptions';
 import {
   audioMessageSchema,
   buttonsMessageSchema,
   contactMessageSchema,
+  forwardMessageSchema,
   listMessageSchema,
   locationMessageSchema,
   mediaMessageSchema,
@@ -41,6 +44,21 @@ export class MessageRouter extends RouterBroker {
   constructor(...guards: RequestHandler[]) {
     super();
     this.router
+      .post(this.routerPath('forwardMessage'), ...guards, async (req, res) => {
+        // The shared validator merges query parameters into the authenticated instance.
+        if (Object.keys(req.query).length > 0) {
+          throw new BadRequestException('Query parameters are not supported for forwarding');
+        }
+
+        const response = await this.dataValidate<ForwardMessageDto>({
+          request: req,
+          schema: forwardMessageSchema,
+          ClassRef: ForwardMessageDto,
+          execute: (instance, data) => sendMessageController.forwardMessage(instance, data),
+        });
+
+        return res.status(HttpStatus.CREATED).json(response);
+      })
       .post(this.routerPath('sendTemplate'), ...guards, async (req, res) => {
         const response = await this.dataValidate<SendTemplateDto>({
           request: req,

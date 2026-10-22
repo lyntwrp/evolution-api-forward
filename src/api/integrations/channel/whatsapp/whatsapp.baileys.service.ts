@@ -34,6 +34,7 @@ import { HandleLabelDto, LabelDto } from '@api/dto/label.dto';
 import {
   Button,
   ContactMessage,
+  ForwardMessageDto,
   KeyType,
   MediaMessage,
   Options,
@@ -551,6 +552,67 @@ export class BaileysStartupService extends ChannelStartupService {
     } catch {
       return { conversation: '' };
     }
+  }
+
+  public async forwardMessage(data: ForwardMessageDto) {
+    const stored = (await this.getMessage({ id: data.messageId }, true)) as WAMessage & { contextInfo?: any };
+    if (!stored?.key || !stored?.message || !getContentType(stored.message)) {
+      throw new BadRequestException('Message not found in this instance');
+    }
+
+    const supportedTypes = [
+      'conversation',
+      'extendedTextMessage',
+      'imageMessage',
+      'videoMessage',
+      'audioMessage',
+      'ptvMessage',
+      'documentMessage',
+      'stickerMessage',
+      'contactMessage',
+      'contactsArrayMessage',
+      'locationMessage',
+    ];
+    const blockedTypes = [
+      'ephemeralMessage',
+      'viewOnceMessage',
+      'viewOnceMessageV2',
+      'viewOnceMessageV2Extension',
+      'editedMessage',
+      'documentWithCaptionMessage',
+      'deviceSentMessage',
+      'protocolMessage',
+      'reactionMessage',
+    ];
+    if (!supportedTypes.includes(getContentType(stored.message)) || blockedTypes.some((type) => stored.message[type])) {
+      throw new BadRequestException('Stored message type is not supported for forwarding');
+    }
+
+    let fullMessage: WAMessage;
+    try {
+      // Prisma JSON stores media bytes as indexed objects; restore them before protobuf conversion.
+      const restored = this.deserializeMessageBuffers(
+        JSON.parse(JSON.stringify({ message: stored.message, contextInfo: stored.contextInfo }), (key, value) =>
+          value?.type === 'Buffer' && Array.isArray(value.data)
+            ? Buffer.from(value.data)
+            : BufferJSON.reviver(key, value),
+        ),
+      );
+      const message = restored.message;
+      if (typeof message.conversation === 'string' && restored.contextInfo) {
+        message.extendedTextMessage = {
+          text: message.conversation,
+          contextInfo: restored.contextInfo,
+        };
+        delete message.conversation;
+      }
+
+      fullMessage = proto.WebMessageInfo.fromObject({ key: stored.key, message }) as WAMessage;
+    } catch {
+      throw new BadRequestException('Stored message cannot be forwarded');
+    }
+
+    return await this.sendMessageWithTyping(data.number, { forward: fullMessage, force: true }, {});
   }
 
   private async defineAuthState() {
@@ -2154,6 +2216,10 @@ export class BaileysStartupService extends ChannelStartupService {
 
     // NOTE: NÃO DEVEMOS GERAR O messageId AQUI, SOMENTE SE VIER INFORMADO POR PARAMETRO. A GERAÇÃO ANTERIOR IMPEDE O WZAP DE IDENTIFICAR A SOURCE.
     if (messageId) option.messageId = messageId;
+
+    if (message['forward']) {
+      return await this.client.sendMessage(sender, message as AnyMessageContent, option);
+    }
 
     if (message['viewOnceMessage']) {
       const m = generateWAMessageFromContent(sender, message, {

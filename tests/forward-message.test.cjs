@@ -1,0 +1,316 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const { test, before } = require('node:test');
+const ts = require('typescript');
+const { validate } = require('jsonschema');
+
+// Compile the real source in isolation: no app boot, real database, Redis or WhatsApp connection.
+// Baileys protobuf and message generation remain real; only external effects are mocked.
+const root = path.resolve(__dirname, '..');
+const statusCodes = { OK: 200, CREATED: 201, BAD_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404 };
+const noOp = () => {};
+const logger = { verbose: noOp, error: noOp, warn: noOp, log: noOp, info: noOp, debug: noOp, trace: noOp };
+let baileys;
+
+function loadSource(relativePath, dependencies = {}) {
+  const filename = path.join(root, relativePath);
+  const output = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+    fileName: filename,
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
+  }).outputText;
+  const module = { exports: {} };
+  const wrapper = vm.runInThisContext(`(function(require,module,exports,__filename,__dirname){${output}\n})`, { filename });
+  wrapper((name) => {
+    if (Object.hasOwn(dependencies, name)) return dependencies[name];
+    if (name === 'baileys') return baileys;
+    if (name === 'uuid') return { v4: () => 'test-schema-id' };
+    if (name === './index.router' || name === '@api/routes/index.router') return { HttpStatus: statusCodes };
+    if (name === '@config/logger.config') return { Logger: class { error() {} } };
+    if (name === '@exceptions') return exceptions;
+    if (['express', 'express-async-errors', 'multer', 'jsonschema', 'class-validator', 'emoji-regex', 'long', 'crypto', 'path', 'os', 'stream', 'child_process'].includes(name)) return require(name);
+    return {};
+  }, module, module.exports, filename, path.dirname(filename));
+  return module.exports;
+}
+
+let exceptions;
+let Service;
+let SendMessageController;
+let schema;
+let dto;
+let events;
+
+before(async () => {
+  baileys = await import('baileys');
+  exceptions = {
+    ...loadSource('src/exceptions/400.exception.ts'),
+    ...loadSource('src/exceptions/401.exception.ts'),
+    ...loadSource('src/exceptions/403.exception.ts'),
+    ...loadSource('src/exceptions/404.exception.ts'),
+  };
+  schema = loadSource('src/validate/message.schema.ts');
+  dto = loadSource('src/api/dto/sendMessage.dto.ts');
+  events = loadSource('src/api/types/wa.types.ts');
+  class ChannelStartupService {
+    get instanceId() { return this.instance.id; }
+    get instanceName() { return this.instance.name; }
+  }
+  const CacheService = class {};
+  const CacheEngine = class { getEngine() { return {}; } };
+  ({ BaileysStartupService: Service } = loadSource('src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts', {
+    '@api/services/channel.service': { ChannelStartupService },
+    '@api/services/cache.service': { CacheService },
+    '@cache/cacheengine': { CacheEngine },
+    '@config/env.config': { configService: { get: () => ({}) } },
+    '@api/types/wa.types': events,
+    '@api/dto/chat.dto': loadSource('src/api/dto/chat.dto.ts'),
+    '@utils/createJid': loadSource('src/utils/createJid.ts'),
+    '@utils/onWhatsappCache': { getOnWhatsappCache: async () => [], saveOnWhatsappCache: async () => {} },
+    '@utils/renderStatus': loadSource('src/utils/renderStatus.ts'),
+  }));
+  ({ SendMessageController } = loadSource('src/api/controllers/sendMessage.controller.ts'));
+});
+
+function fixture(message = { conversation: 'Mensaje original' }, options = {}) {
+  const instanceId = options.instanceId || 'test-instance-id';
+  const saved = {
+    key: { id: '3EB0ORIGINAL', remoteJid: '120363000000001@g.us', fromMe: true },
+    message,
+    contextInfo: options.contextInfo,
+    instanceId: options.sourceInstanceId || instanceId,
+  };
+  const calls = { queries: [], sends: [], saved: [], webhooks: [], groups: [] };
+  const service = Object.create(Service.prototype);
+  service.instance = { id: instanceId, name: 'forward-test', wuid: '5215555555555@s.whatsapp.net' };
+  service.logger = logger;
+  service.localChatwoot = { enabled: false };
+  service.localWebhook = { enabled: false };
+  service.configService = { get(name) {
+    return {
+      DATABASE: { SAVE_DATA: { NEW_MESSAGE: true } },
+      CACHE: { REDIS: { ENABLED: false }, LOCAL: { ENABLED: false } },
+      CHATWOOT: { ENABLED: false }, OPENAI: { ENABLED: false }, S3: { ENABLE: false },
+    }[name] || {};
+  } };
+  service.prismaRepository = {
+    async $queryRaw(strings, ...values) {
+      calls.queries.push({ sql: strings.join('?'), values });
+      return values[0] === saved.instanceId && values[1] === saved.key.id ? [saved] : [];
+    },
+    contact: { findMany: async () => [] },
+    message: { async create({ data }) { calls.saved.push(data); return { id: 'database-forward-id', ...data }; } },
+  };
+  service.findGroup = async ({ groupJid }) => {
+    calls.groups.push(groupJid);
+    return options.missingGroup ? null : { id: groupJid, subject: 'Grupo de prueba', participants: [], ephemeralDuration: 0 };
+  };
+  service.sendDataWebhook = (event, payload) => { calls.webhooks.push({ event, payload }); };
+  service.client = {
+    onWhatsApp: async (...jids) => jids.map((jid) => ({ jid, exists: true })),
+    async sendMessage(jid, content, sendOptions) {
+      calls.sends.push({ jid, content, options: sendOptions });
+      const generated = await baileys.generateWAMessageContent(content, { userJid: service.instance.wuid, logger });
+      return baileys.proto.WebMessageInfo.fromObject({
+        key: { remoteJid: jid, fromMe: true, id: '3EB0FORWARDED' },
+        message: generated,
+        messageTimestamp: 1792674000,
+        status: 1,
+      });
+    },
+  };
+  return { service, saved, calls };
+}
+
+test('schema accepts group JIDs and phone numbers and rejects extra forwarding instructions', () => {
+  const valid = (body) => validate(Object.assign(new dto.ForwardMessageDto(), body), schema.forwardMessageSchema).valid;
+  for (const number of ['120363000000002@g.us', '12345-67890@g.us', '5215555555555', '5215555555555@s.whatsapp.net']) {
+    assert.equal(valid({ number, messageId: '3EB0ORIGINAL' }), true, number);
+  }
+  for (const body of [
+    { number: '', messageId: 'id' }, { number: '120363000000002@g.us', messageId: '' },
+    { number: '120363000000002@g.us', messageId: '   ' },
+    { number: 'status@broadcast', messageId: 'id' }, { number: 'x@newsletter', messageId: 'id' },
+    { number: '123@lid', messageId: 'id' }, { number: 'https://example.com', messageId: 'id' },
+    { number: '123@g.us', messageId: 'id', instanceName: 'other' },
+    { number: '123@g.us', messageId: 'id', message: { conversation: 'injected' } },
+    { number: '123@g.us', messageId: 'x'.repeat(201) },
+  ]) assert.equal(valid(body), false, JSON.stringify(body));
+});
+
+test('group forwarding uses the instance-scoped parameterized lookup and normal persistence/webhook', async () => {
+  const { service, calls } = fixture();
+  const result = await service.forwardMessage({ number: '120363000000002@g.us', messageId: '3EB0ORIGINAL' });
+  assert.equal(calls.queries.length, 1);
+  assert.match(calls.queries[0].sql, /WHERE "instanceId" = \?/);
+  assert.match(calls.queries[0].sql, /"key"->>'id' = \?/);
+  assert.deepEqual(calls.queries[0].values, ['test-instance-id', '3EB0ORIGINAL']);
+  assert.equal(calls.sends.length, 1);
+  assert.equal(calls.sends[0].jid, '120363000000002@g.us');
+  assert.equal(calls.sends[0].content.force, true);
+  assert.equal(calls.sends[0].options.useCachedGroupMetadata, true);
+  assert.equal(calls.sends[0].content.forward.message.conversation, 'Mensaje original');
+  assert.ok(calls.groups.length >= 1);
+  assert.equal(calls.saved.length, 1);
+  assert.equal(calls.saved[0].instanceId, 'test-instance-id');
+  assert.equal(result.key.id, '3EB0FORWARDED');
+  assert.equal(result.key.remoteJid, '120363000000002@g.us');
+  assert.equal(result.contextInfo.isForwarded, true);
+  assert.equal(result.contextInfo.forwardingScore, 1);
+  assert.equal(calls.webhooks.length, 1);
+  assert.equal(calls.webhooks[0].event, events.Events.SEND_MESSAGE);
+  assert.equal(calls.webhooks[0].payload, result);
+});
+
+test('an existing forwarding score survives stored text normalization and increases once', async () => {
+  const { service } = fixture({ conversation: 'Ya reenviado' }, { contextInfo: { isForwarded: true, forwardingScore: 3 } });
+  const result = await service.forwardMessage({ number: '120363000000002@g.us', messageId: '3EB0ORIGINAL' });
+  assert.equal(result.message.conversation, 'Ya reenviado');
+  assert.equal(result.contextInfo.forwardingScore, 4);
+});
+
+test('media byte fields are restored from Prisma indexed JSON, base64, and legacy Buffer JSON', async () => {
+  const bytes = Buffer.from([1, 2, 3, 4, 240, 255]);
+  for (const serialized of [{ ...bytes }, bytes.toString('base64'), { type: 'Buffer', data: bytes.toString('base64') }, bytes.toJSON()]) {
+    const { service, calls } = fixture({ imageMessage: {
+      url: 'https://mmg.whatsapp.net/test-only', mimetype: 'image/jpeg', caption: 'Foto de prueba',
+      mediaKey: serialized, fileSha256: serialized, fileEncSha256: serialized,
+      directPath: '/test-only', fileLength: 6,
+    } });
+    const result = await service.forwardMessage({ number: '120363000000002@g.us', messageId: '3EB0ORIGINAL' });
+    const image = calls.sends[0].content.forward.message.imageMessage;
+    for (const field of ['mediaKey', 'fileSha256', 'fileEncSha256']) {
+      assert.ok(image[field], `${field}: ${JSON.stringify(serialized)}`);
+      assert.deepEqual(Buffer.from(image[field]), bytes);
+      assert.deepEqual(Buffer.from(result.message.imageMessage[field]), bytes);
+    }
+    assert.equal(result.message.imageMessage.caption, 'Foto de prueba');
+    assert.equal(calls.saved.length, 1);
+  }
+});
+
+test('a missing message or one stored in another instance causes no send or persistence', async () => {
+  for (const options of [{}, { sourceInstanceId: 'another-instance' }]) {
+    const { service, calls } = fixture(undefined, options);
+    await assert.rejects(service.forwardMessage({ number: '123@g.us', messageId: options.sourceInstanceId ? '3EB0ORIGINAL' : 'unknown' }),
+      (error) => error.status === 400 && JSON.stringify(error).includes('Message not found'));
+    assert.equal(calls.sends.length, 0);
+    assert.equal(calls.saved.length, 0);
+    assert.equal(calls.webhooks.length, 0);
+  }
+});
+
+test('a nonexistent group fails before sending', async () => {
+  const { service, calls } = fixture(undefined, { missingGroup: true });
+  await assert.rejects(service.forwardMessage({ number: '123@g.us', messageId: '3EB0ORIGINAL' }));
+  assert.equal(calls.sends.length, 0);
+});
+
+test('view-once, ephemeral and control-message sources are rejected before side effects', async () => {
+  for (const message of [
+    { viewOnceMessage: { message: { imageMessage: { caption: 'Una sola vez' } } } },
+    { viewOnceMessageV2: { message: { imageMessage: { caption: 'Una sola vez' } } } },
+    { viewOnceMessageV2Extension: { message: { imageMessage: { caption: 'Una sola vez' } } } },
+    { conversation: 'Texto señuelo', viewOnceMessage: { message: { imageMessage: { caption: 'Una sola vez' } } } },
+    { ephemeralMessage: { message: { conversation: 'Temporal' } } },
+    { protocolMessage: { type: 0, key: { id: 'revoke-target' } } },
+    { reactionMessage: { text: 'x', key: { id: 'reaction-target' } } },
+    { pollCreationMessage: { name: 'Encuesta', options: [{ optionName: 'A' }] } },
+  ]) {
+    const { service, calls } = fixture(message);
+    await assert.rejects(service.forwardMessage({ number: '123@g.us', messageId: '3EB0ORIGINAL' }),
+      (error) => error.status === 400, JSON.stringify(message));
+    assert.equal(calls.sends.length, 0);
+    assert.equal(calls.saved.length, 0);
+    assert.equal(calls.webhooks.length, 0);
+  }
+});
+
+test('phone forwarding uses normal number resolution and produces a new message ID', async () => {
+  const { service, calls } = fixture();
+  const result = await service.forwardMessage({ number: '14155552671', messageId: '3EB0ORIGINAL' });
+  assert.equal(calls.sends[0].jid, '14155552671@s.whatsapp.net');
+  assert.equal(result.key.remoteJid, '14155552671@s.whatsapp.net');
+  assert.notEqual(result.key.id, '3EB0ORIGINAL');
+  assert.equal(result.contextInfo.isForwarded, true);
+});
+
+test('WhatsApp send failure is reported and does not persist or emit a success event', async () => {
+  const { service, calls } = fixture();
+  service.client.sendMessage = async () => { throw new Error('Test transport failure'); };
+  await assert.rejects(service.forwardMessage({ number: '123@g.us', messageId: '3EB0ORIGINAL' }),
+    (error) => error.status === 400 && JSON.stringify(error).includes('Test transport failure'));
+  assert.equal(calls.saved.length, 0);
+  assert.equal(calls.webhooks.length, 0);
+});
+
+test('normal text sending keeps its previous content and normal send effects', async () => {
+  const { service, calls } = fixture();
+  const result = await service.textMessage({ number: '120363000000002@g.us', text: 'Texto normal' });
+  assert.equal(calls.sends[0].content.text, 'Texto normal');
+  assert.equal(calls.sends[0].content.forward, undefined);
+  assert.equal(result.message.conversation, 'Texto normal');
+  assert.equal(calls.saved.length, 1);
+  assert.equal(calls.webhooks[0].event, events.Events.SEND_MESSAGE);
+});
+
+test('controller rejects unsupported or unloaded channels with a controlled response', async () => {
+  const controller = new SendMessageController({ waInstances: { business: { integration: 'WHATSAPP-BUSINESS' } } });
+  for (const instanceName of ['business', 'missing']) {
+    await assert.rejects(controller.forwardMessage({ instanceName }, { number: '123@g.us', messageId: 'id' }),
+      (error) => error.status === 400 && JSON.stringify(error).includes('WHATSAPP-BAILEYS'));
+  }
+});
+
+test('HTTP route enforces API-key auth, strict schema, and blocks query retargeting', async () => {
+  const express = require('express');
+  const calls = [];
+  const testInstance = { forwardMessage: async (data) => { calls.push(data); return { key: { id: 'forwarded' } }; } };
+  const monitor = { waInstances: { allowed: testInstance, other: testInstance } };
+  const configService = { get(name) {
+    return name === 'AUTHENTICATION' ? { API_KEY: { KEY: 'test-global-key' } } : { SAVE_DATA: { INSTANCE: true } };
+  } };
+  const serverModule = {
+    waMonitor: monitor,
+    prismaRepository: { instance: { findUnique: async ({ where }) => ({ token: `${where.name}-test-token` }) } },
+    sendMessageController: new SendMessageController(monitor),
+  };
+  const { authGuard } = loadSource('src/api/guards/auth.guard.ts', {
+    '@api/server.module': serverModule, '@config/env.config': { configService },
+  });
+  const { RouterBroker } = loadSource('src/api/abstract/abstract.router.ts');
+  const { MessageRouter } = loadSource('src/api/routes/sendMessage.router.ts', {
+    '@api/abstract/abstract.router': { RouterBroker }, '@api/dto/sendMessage.dto': dto,
+    '@api/server.module': serverModule, '@validate/validate.schema': schema,
+  });
+  const app = express();
+  app.use(express.json());
+  app.use('/message', new MessageRouter(authGuard.apikey).router);
+  app.use((error, req, res, next) => res.status(error.status || 500).json(error));
+  const server = require('node:http').createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}/message/forwardMessage/allowed`;
+  const body = { number: '120363000000002@g.us', messageId: '3EB0ORIGINAL' };
+  const request = async (suffix, key, payload = body) => fetch(url + suffix, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { apikey: key } : {}) }, body: JSON.stringify(payload),
+  });
+  try {
+    assert.equal((await request('', null)).status, 401);
+    assert.equal((await request('', 'wrong-test-token')).status, 401);
+    assert.equal((await request('', 'other-test-token')).status, 401);
+    assert.equal((await request('?instanceName=other', 'allowed-test-token')).status, 400);
+    assert.equal((await request('?instanceId=other', 'allowed-test-token')).status, 400);
+    assert.equal((await request('', 'allowed-test-token', { ...body, text: 'extra' })).status, 400);
+    assert.equal((await request('', 'allowed-test-token', { ...body, number: 'status@broadcast' })).status, 400);
+    assert.equal(calls.length, 0);
+    const response = await request('', 'allowed-test-token');
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).key.id, 'forwarded');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].number, body.number);
+    assert.equal(calls[0].messageId, body.messageId);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
