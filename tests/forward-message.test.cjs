@@ -81,7 +81,7 @@ function fixture(message = { conversation: 'Mensaje original' }, options = {}) {
     contextInfo: options.contextInfo,
     instanceId: options.sourceInstanceId || instanceId,
   };
-  const calls = { queries: [], sends: [], saved: [], webhooks: [], groups: [] };
+  const calls = { queries: [], sends: [], generated: [], saved: [], webhooks: [], groups: [] };
   const service = Object.create(Service.prototype);
   service.instance = { id: instanceId, name: 'forward-test', wuid: '5215555555555@s.whatsapp.net' };
   service.logger = logger;
@@ -112,6 +112,7 @@ function fixture(message = { conversation: 'Mensaje original' }, options = {}) {
     async sendMessage(jid, content, sendOptions) {
       calls.sends.push({ jid, content, options: sendOptions });
       const generated = await baileys.generateWAMessageContent(content, { userJid: service.instance.wuid, logger });
+      calls.generated.push(generated);
       return baileys.proto.WebMessageInfo.fromObject({
         key: { remoteJid: jid, fromMe: true, id: '3EB0FORWARDED' },
         message: generated,
@@ -160,6 +161,67 @@ async function storeReceivedPreview(f, original = originalLinkPreview()) {
   // Match the JSON representation obtained after a real Prisma JSONB round trip.
   Object.assign(f.saved, JSON.parse(JSON.stringify(storage)));
   return { original, normalized, storage };
+}
+
+async function editablePreviewFixture({ failUpdate = false } = {}) {
+  const f = fixture();
+  const original = originalLinkPreview();
+  original.key.fromMe = true;
+  await storeReceivedPreview(f, original);
+  f.saved.id = 'stored-original-id';
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  f.calls.updates = [];
+  f.service.prismaRepository.$queryRaw = async (strings, ...values) => {
+    f.calls.queries.push({ sql: strings.join('?'), values });
+    return values[0] === f.saved.instanceId && values[1] === f.saved.key.id ? [clone(f.saved)] : [];
+  };
+  Object.assign(f.service.prismaRepository.message, {
+    async findFirst({ where }) {
+      return where.key?.equals === f.saved.key.id ? clone(f.saved) : null;
+    },
+    async update({ where, data }) {
+      assert.equal(where.id, f.saved.id);
+      f.calls.updates.push(clone(data));
+      if (failUpdate) throw new Error('Test database update failure');
+      Object.assign(f.saved, clone(data));
+      return clone(f.saved);
+    },
+    async count({ where }) {
+      assert.equal(where.instanceId, f.saved.instanceId);
+      return 1;
+    },
+    async findMany({ where }) {
+      assert.equal(where.instanceId, f.saved.instanceId);
+      return [clone(f.saved)];
+    },
+  });
+  return f;
+}
+
+function syntheticTransportMetadata() {
+  const distribution = Buffer.concat([
+    Buffer.from([0x33]),
+    baileys.proto.SenderKeyDistributionMessage.encode({
+      id: 101,
+      iteration: 7,
+      chainKey: Buffer.alloc(32, 0x41),
+      signingKey: Buffer.concat([Buffer.from([5]), Buffer.alloc(32, 0x42)]),
+    }).finish(),
+  ]);
+  return {
+    senderKeyDistributionMessage: {
+      groupId: '120363000000001@g.us',
+      axolotlSenderKeyDistributionMessage: distribution,
+    },
+    fastRatchetKeySenderKeyDistributionMessage: {
+      groupId: '120363000000001@g.us',
+      axolotlSenderKeyDistributionMessage: distribution,
+    },
+    messageContextInfo: { messageSecret: Buffer.alloc(32, 0x43), deviceListMetadataVersion: 2 },
+    mediaUrl: 'https://example.test/private-storage-object',
+    base64: 'U1lOVEhFVElDX1NFQ1JFVA==',
+    speechToText: 'Synthetic stored transcription',
+  };
 }
 
 function assertPreviewMetadata(actual, expected) {
@@ -261,6 +323,101 @@ test('preview persistence does not mutate the normalized output or the original 
   assert.ok(storage.message[previewSidecar]);
 });
 
+test('received group transport keys are dropped while the original URL card and forwarding score survive', async () => {
+  const f = fixture();
+  const original = originalLinkPreview();
+  Object.assign(original.message, syntheticTransportMetadata());
+  const { storage } = await storeReceivedPreview(f, original);
+  for (const field of Object.keys(syntheticTransportMetadata())) assert.ok(storage.message[field], field);
+  const storedBefore = JSON.stringify(f.saved.message);
+
+  const result = await f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL' });
+  const forwarded = f.calls.sends[0].content.forward.message;
+  const generated = f.calls.generated[0];
+  assert.deepEqual(Object.keys(forwarded), ['extendedTextMessage']);
+  assert.deepEqual(Object.keys(generated), ['extendedTextMessage']);
+  assertPreviewMetadata(generated.extendedTextMessage, original.message.extendedTextMessage);
+  assert.equal(generated.extendedTextMessage.contextInfo.forwardingScore, 4);
+  assert.equal(generated.extendedTextMessage.contextInfo.isForwarded, true);
+  assert.equal(result.key.remoteJid, '14155550002@s.whatsapp.net');
+  for (const field of Object.keys(syntheticTransportMetadata())) {
+    assert.equal(Object.hasOwn(forwarded, field), false, field);
+    assert.equal(Object.hasOwn(generated, field), false, field);
+    assert.equal(Object.hasOwn(result.message, field), false, field);
+    assert.equal(Object.hasOwn(f.calls.saved[1].message, field), false, field);
+  }
+  assert.equal(JSON.stringify(f.saved.message), storedBefore);
+  assert.ok(f.calls.saved[1].message[previewSidecar]);
+});
+
+test('each supported content forwards alone without carrying transport roots or secondary quotes', async () => {
+  const allowed = {
+    conversation: 'Texto permitido',
+    extendedTextMessage: { text: 'Texto extendido' },
+    imageMessage: { caption: 'Imagen', mimetype: 'image/jpeg', mediaKey: previewBytes },
+    videoMessage: { caption: 'Video', mimetype: 'video/mp4', mediaKey: previewBytes },
+    audioMessage: { mimetype: 'audio/ogg', mediaKey: previewBytes },
+    ptvMessage: { mimetype: 'video/mp4', mediaKey: previewBytes },
+    documentMessage: { fileName: 'test.pdf', mimetype: 'application/pdf', mediaKey: previewBytes },
+    stickerMessage: { mimetype: 'image/webp', mediaKey: previewBytes },
+    contactMessage: { displayName: 'Contacto de prueba', vcard: 'BEGIN:VCARD\nVERSION:3.0\nFN:Test\nEND:VCARD' },
+    contactsArrayMessage: { contacts: [{
+      displayName: 'Test',
+      vcard: 'BEGIN:VCARD\nFN:Test\nEND:VCARD',
+      contextInfo: {
+        quotedMessage: { conversation: 'Nested private quote' },
+        participant: '14155550099@s.whatsapp.net',
+        mentionedJid: ['14155550098@s.whatsapp.net'],
+        forwardingScore: 17,
+      },
+    }] },
+    locationMessage: { degreesLatitude: 19.4, degreesLongitude: -99.1, name: 'Test location' },
+  };
+  for (const [type, content] of Object.entries(allowed)) {
+    const contextInfo = { forwardingScore: 2, quotedMessage: { conversation: 'Private source quote' } };
+    if (typeof content === 'object') content.contextInfo = contextInfo;
+    const f = fixture({ [type]: content, ...syntheticTransportMetadata() }, { contextInfo });
+    await f.service.forwardMessage({ number: '120363000000002@g.us', messageId: '3EB0ORIGINAL' });
+    const expectedType = type === 'conversation' ? 'extendedTextMessage' : type;
+    const generated = f.calls.generated[0];
+    assert.deepEqual(Object.keys(generated), [expectedType], type);
+    assert.equal(generated[expectedType].contextInfo.forwardingScore, 3, type);
+    assert.equal(generated[expectedType].contextInfo.quotedMessage, undefined, type);
+    if (content.mediaKey) assert.deepEqual(Buffer.from(generated[expectedType].mediaKey), previewBytes, type);
+    if (content.vcard) assert.equal(generated[expectedType].vcard, content.vcard, type);
+    if (content.contacts) {
+      assert.equal(generated[expectedType].contacts[0].vcard, content.contacts[0].vcard, type);
+      assert.equal(generated[expectedType].contacts[0].displayName, content.contacts[0].displayName, type);
+      assert.equal(Object.hasOwn(generated[expectedType].contacts[0], 'contextInfo'), false, type);
+    }
+    assert.equal(f.calls.saved.length, 1, type);
+  }
+});
+
+test('mixed, unknown and control content cannot accompany a permitted message during forwarding', async () => {
+  const messages = [
+    { conversation: 'Señuelo', imageMessage: { caption: 'Second payload', contextInfo: { quotedMessage: { conversation: 'Private quote' } } } },
+    { imageMessage: { caption: 'First' }, conversation: 'Second' },
+    { extendedTextMessage: { text: 'First' }, contactMessage: { vcard: 'Private contact' } },
+    { conversation: 'First', extendedTextMessage: { text: 'Second' } },
+    { conversation: 'Señuelo', pollCreationMessage: { name: 'Hidden poll' } },
+    { conversation: 'Señuelo', groupInviteMessage: { groupJid: '123@g.us', inviteCode: 'synthetic' } },
+    { conversation: 'Señuelo', newsletterAdminInviteMessage: { newsletterJid: '123@newsletter' } },
+    { conversation: 'Señuelo', unknownFutureMessage: { arbitrary: true } },
+    { unknownFutureMessage: { arbitrary: true } },
+    { ...syntheticTransportMetadata() },
+  ];
+  for (const message of messages) {
+    const f = fixture(message);
+    await assert.rejects(f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL' }),
+      (error) => error.status === 400, JSON.stringify(message));
+    assert.equal(f.calls.sends.length, 0);
+    assert.equal(f.calls.generated.length, 0);
+    assert.equal(f.calls.saved.length, 0);
+    assert.equal(f.calls.webhooks.length, 0);
+  }
+});
+
 test('legacy stored text forwards without manufacturing preview metadata or changing response shape', async () => {
   const f = fixture({ conversation: 'https://example.test/legacy' });
   const result = await f.service.forwardMessage({ number: '120363000000002@g.us', messageId: '3EB0ORIGINAL' });
@@ -306,6 +463,60 @@ test('an edited stored text cannot reuse the previous URL card or forward its st
   assert.equal(forwarded.extendedTextMessage?.jpegThumbnail?.length ?? 0, 0);
   assert.equal(forwarded.extendedTextMessage?.text || forwarded.conversation, f.saved.message.conversation);
   assert.equal(f.calls.saved[1].message[previewSidecar], undefined);
+});
+
+test('a successful API text edit removes the obsolete stored URL card before a later fetch or forward', async () => {
+  const f = await editablePreviewFixture();
+  const before = await f.service.fetchMessages({ where: { key: { id: f.saved.key.id } } });
+  assert.ok(before.messages.records[0].message[previewSidecar]);
+  const editedText = 'Texto nuevo sin la tarjeta anterior';
+  const result = await f.service.updateMessage({ number: f.saved.key.remoteJid, key: f.saved.key, text: editedText });
+  assert.equal(result.message.protocolMessage.editedMessage.extendedTextMessage.text, editedText);
+  assert.equal(f.calls.updates.length, 1);
+  assert.equal(f.calls.updates[0].message[previewSidecar], undefined);
+  assert.equal(f.saved.message[previewSidecar], undefined);
+  assert.equal(f.saved.message.conversation, editedText);
+  assert.equal(f.saved.status, 'EDITED');
+
+  const fetched = await f.service.fetchMessages({ where: { key: { id: f.saved.key.id } } });
+  assert.equal(fetched.messages.records[0].message.conversation, editedText);
+  assert.equal(fetched.messages.records[0].message[previewSidecar], undefined);
+  await f.service.forwardMessage({ number: '14155550002', messageId: f.saved.key.id });
+  const generated = f.calls.generated.at(-1).extendedTextMessage;
+  assert.equal(generated.text, editedText);
+  assert.equal(Object.hasOwn(generated, 'title'), false);
+  assert.equal(Object.hasOwn(generated, 'jpegThumbnail'), false);
+});
+
+test('an unedited stored URL card remains available for fetching and forwarding', async () => {
+  const f = await editablePreviewFixture();
+  const before = JSON.stringify(f.saved);
+  const fetched = await f.service.fetchMessages({ where: { key: { id: f.saved.key.id } } });
+  assert.ok(fetched.messages.records[0].message[previewSidecar]);
+  await f.service.forwardMessage({ number: '14155550002', messageId: f.saved.key.id });
+  assertPreviewMetadata(f.calls.generated[0].extendedTextMessage, originalLinkPreview().message.extendedTextMessage);
+  assert.equal(JSON.stringify(f.saved), before);
+  assert.equal(f.calls.updates.length, 0);
+});
+
+test('a failed API edit does not remove a previously stored URL card', async () => {
+  for (const failure of ['transport', 'database']) {
+    const f = await editablePreviewFixture({ failUpdate: failure === 'database' });
+    const before = JSON.stringify(f.saved);
+    if (failure === 'transport') {
+      f.service.client.sendMessage = async () => { throw new Error('Test edit transport failure'); };
+    }
+    await assert.rejects(f.service.updateMessage({
+      number: f.saved.key.remoteJid,
+      key: f.saved.key,
+      text: 'Edit which cannot be completed',
+    }), /Test (edit transport|database update) failure/);
+    assert.equal(JSON.stringify(f.saved), before, failure);
+    const fetched = await f.service.fetchMessages({ where: { key: { id: f.saved.key.id } } });
+    assert.ok(fetched.messages.records[0].message[previewSidecar], failure);
+    assert.equal(fetched.messages.records[0].message.conversation, originalLinkPreview().message.extendedTextMessage.text, failure);
+    if (failure === 'transport') assert.equal(f.calls.updates.length, 0);
+  }
 });
 
 test('preview persistence whitelists visual metadata and keeps plain normalization unchanged', () => {
@@ -355,7 +566,7 @@ test('externalAdReply preview is preserved without restoring quotes, mentions or
   assert.equal(result.contextInfo.forwardingScore, 4);
   for (const name of ['quotedMessage', 'stanzaId', 'participant']) assert.equal(result.contextInfo[name], undefined, name);
   for (const name of ['ctwaClid', 'sourceId', 'ctaPayload', 'ref']) {
-    assert.equal(f.calls.sends[0].content.contextInfo.externalAdReply[name], undefined, name);
+    assert.equal(Object.hasOwn(f.calls.sends[0].content.contextInfo.externalAdReply, name), false, name);
     assert.equal(result.contextInfo.externalAdReply[name], undefined, name);
   }
   assert.deepEqual(result.contextInfo.mentionedJid ?? [], []);

@@ -63,6 +63,12 @@ No hay cola ni idempotencia añadidas. Se admiten texto, imagen, video, audio, P
 documento, sticker, contacto/lista de contactos y ubicación ordinaria. Se rechazan
 wrappers de una sola visualización, efímeros, ediciones, mensajes de protocolo,
 reacciones y tipos fuera de esa lista, incluso cuando se mezclan con texto.
+Se exige exactamente un contenido permitido. Los registros con dos contenidos
+simultáneos se rechazan; los metadatos internos de distribución de claves y de
+transporte se descartan. El objeto enviado se reconstruye exclusivamente a partir
+del contenido seleccionado, sus bytes multimedia y la tarjeta permitida. No se
+entrega el objeto completo almacenado a Baileys. Las citas y menciones del origen,
+incluidas las de contactos anidados, no se trasladan al nuevo envío.
 Los documentos ya normalizados por la base se admiten; un wrapper
 `documentWithCaptionMessage` aún sin normalizar se rechaza. La media original puede
 haber expirado o dejar de estar disponible. Si la base ya descartó una envoltura o
@@ -88,8 +94,8 @@ almacenado; no contiene claves de la API.
 `forwardMessage` reconstruye la tarjeta antes de generar el reenvío y elimina el
 campo reservado antes de entregar el mensaje a Baileys. También conserva los
 campos visuales de una tarjeta `externalAdReply` ya presente en el contexto,
-sin restaurar citas, menciones, identificadores publicitarios ni contadores
-anteriores. La marca de reenviado y su contador siguen a cargo de Baileys.
+sin restaurar citas, menciones ni identificadores publicitarios. Baileys establece
+la marca de reenviado e incrementa una sola vez el contador válido del original.
 
 La copia se liga al texto original para no reutilizar una tarjeta de enlace
 después de editarlo. En mensajes con estado `EDITED` se omite la tarjeta contextual
@@ -97,11 +103,26 @@ anterior. Se guardan únicamente los campos de vista previa permitidos, incluido
 los bytes y referencias de miniaturas de mayor resolución; no se descargan URLs
 para fabricar una tarjeta nueva.
 
+Después de una edición exitosa por API se elimina `__evolutionForwardPreview`
+del registro actualizado, incluida su copia del texto anterior. Si falla el
+envío o la persistencia de la edición, no se modifica la copia almacenada original.
+Los mensajes sin editar conservan su tarjeta, también si fueron guardados por la
+versión previa de este fork. Las claves de una miniatura o archivo, necesarias
+para mostrar ese contenido, se conservan; las claves de distribución del grupo
+se excluyen del reenvío.
+
+Esta corrección no ejecuta una limpieza retroactiva de la base: si se editaron
+mensajes con la versión anterior, sus copias auxiliares antiguas pueden seguir
+almacenadas y ser visibles en consultas autenticadas. Su limpieza requiere una
+operación separada sobre esos registros. Tampoco reconstruye tarjetas descartadas
+por versiones anteriores de Evolution.
+
 No requiere dependencias, migraciones ni cambios en el cuerpo del POST o el
-workflow. Para probar la tarjeta ordinaria debes desplegar esta corrección en
-el laboratorio y recibir un mensaje **nuevo** que ya muestre la vista previa.
-Los campos descartados por versiones anteriores no se pueden recuperar de esa
-fila. Una tarjeta contextual que ya esté en `contextInfo.externalAdReply` sí
+workflow. Para comprobar visualmente esta corrección en el laboratorio, recibe
+un mensaje **nuevo** que ya muestre la vista previa. También siguen siendo
+compatibles las tarjetas guardadas por la versión previa de este fork. Los campos
+que Evolution descartó antes de incorporar ese soporte no se pueden recuperar de
+esa fila. Una tarjeta contextual que ya esté en `contextInfo.externalAdReply` sí
 puede conservarse al reenviar ese registro, salvo el caso editado descrito arriba.
 
 La comprobación automatizada valida que los metadatos llegan a la generación de

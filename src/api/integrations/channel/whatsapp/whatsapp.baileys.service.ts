@@ -571,7 +571,10 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async forwardMessage(data: ForwardMessageDto) {
-    const stored = (await this.getMessage({ id: data.messageId }, true)) as WAMessage & { contextInfo?: any };
+    const stored = (await this.getMessage({ id: data.messageId }, true)) as WAMessage & {
+      contextInfo?: any;
+      message: proto.IMessage & { __evolutionForwardPreview?: { version: number; text: string; fields: any } };
+    };
     if (!stored?.key || !stored?.message || !getContentType(stored.message)) {
       throw new BadRequestException('Message not found in this instance');
     }
@@ -589,34 +592,82 @@ export class BaileysStartupService extends ChannelStartupService {
       'contactsArrayMessage',
       'locationMessage',
     ];
-    const blockedTypes = [
-      'ephemeralMessage',
-      'viewOnceMessage',
-      'viewOnceMessageV2',
-      'viewOnceMessageV2Extension',
-      'editedMessage',
-      'documentWithCaptionMessage',
-      'deviceSentMessage',
-      'protocolMessage',
-      'reactionMessage',
+    // These may accompany received content, but must never become forwarding content.
+    const ignoredFields = [
+      'senderKeyDistributionMessage',
+      'fastRatchetKeySenderKeyDistributionMessage',
+      'messageContextInfo',
+      '__evolutionForwardPreview',
+      'mediaUrl',
+      'base64',
+      'speechToText',
     ];
-    if (!supportedTypes.includes(getContentType(stored.message)) || blockedTypes.some((type) => stored.message[type])) {
+    const contentTypes = Object.keys(stored.message).filter(
+      (type) => stored.message[type] != null && !ignoredFields.includes(type),
+    );
+    if (contentTypes.length !== 1 || !supportedTypes.includes(contentTypes[0])) {
       throw new BadRequestException('Stored message type is not supported for forwarding');
+    }
+    const contentType = contentTypes[0];
+    const sourceContent = stored.message[contentType];
+    if (
+      contentType === 'conversation'
+        ? typeof sourceContent !== 'string'
+        : typeof sourceContent !== 'object' || Array.isArray(sourceContent)
+    ) {
+      throw new BadRequestException('Stored message cannot be forwarded');
+    }
+
+    const sourceContext = contentType === 'conversation' ? stored.contextInfo : sourceContent.contextInfo;
+    const score = sourceContext?.forwardingScore;
+    const forwardContext = sourceContext
+      ? { forwardingScore: Number.isInteger(score) && score >= 0 ? Math.min(score, 0xfffffffe) : 0 }
+      : undefined;
+    const visualPreview: Record<string, any> = {};
+    if (sourceContext?.externalAdReply && String(stored.status) !== 'EDITED') {
+      for (const field of [
+        'title',
+        'body',
+        'mediaType',
+        'thumbnailUrl',
+        'mediaUrl',
+        'thumbnail',
+        'sourceUrl',
+        'renderLargerThumbnail',
+        'showAdAttribution',
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(sourceContext.externalAdReply, field)) {
+          visualPreview[field] = sourceContext.externalAdReply[field];
+        }
+      }
     }
 
     let fullMessage: WAMessage;
+    let externalAdReply: proto.ContextInfo.IExternalAdReplyInfo;
     try {
+      // Select one content before conversion. Never hand the stored message envelope to Baileys.
+      const selectedContent =
+        contentType === 'conversation' ? sourceContent : { ...sourceContent, contextInfo: forwardContext };
+      if (contentType === 'contactsArrayMessage' && Array.isArray(selectedContent.contacts)) {
+        selectedContent.contacts = selectedContent.contacts.map((contact) => ({ ...contact, contextInfo: undefined }));
+      }
       // Prisma JSON stores media bytes as indexed objects; restore them before protobuf conversion.
       const restored = this.deserializeMessageBuffers(
-        JSON.parse(JSON.stringify({ message: stored.message, contextInfo: stored.contextInfo }), (key, value) =>
-          value?.type === 'Buffer' && Array.isArray(value.data)
-            ? Buffer.from(value.data)
-            : BufferJSON.reviver(key, value),
+        JSON.parse(
+          JSON.stringify({
+            message: { [contentType]: selectedContent },
+            contextInfo: forwardContext,
+            preview: stored.message.__evolutionForwardPreview,
+            externalAdReply: visualPreview,
+          }),
+          (key, value) =>
+            value?.type === 'Buffer' && Array.isArray(value.data)
+              ? Buffer.from(value.data)
+              : BufferJSON.reviver(key, value),
         ),
       );
       const message = restored.message;
-      const preview = message.__evolutionForwardPreview;
-      delete message.__evolutionForwardPreview;
+      const preview = restored.preview;
       const previewFields: Record<string, any> = {};
       if (preview?.version === 1 && preview.text === message.conversation && preview.fields) {
         for (const field of forwardLinkPreviewFields) {
@@ -635,38 +686,20 @@ export class BaileysStartupService extends ChannelStartupService {
       }
 
       fullMessage = proto.WebMessageInfo.fromObject({ key: stored.key, message }) as WAMessage;
+      if (Object.keys(visualPreview).length > 0) {
+        externalAdReply = proto.ContextInfo.fromObject({ externalAdReply: restored.externalAdReply }).externalAdReply;
+      }
     } catch {
       throw new BadRequestException('Stored message cannot be forwarded');
     }
 
-    // Baileys replaces contextInfo when forwarding. Restore only the original visual card,
-    // never old quotes, mentions, forwarding counters or advertising tracking identifiers.
-    const content = fullMessage.message[getContentType(fullMessage.message)] as any;
-    const externalAdReply = content?.contextInfo?.externalAdReply;
-    const visualPreview: Record<string, any> = {};
-    if (externalAdReply && String(stored.status) !== 'EDITED') {
-      for (const field of [
-        'title',
-        'body',
-        'mediaType',
-        'thumbnailUrl',
-        'mediaUrl',
-        'thumbnail',
-        'sourceUrl',
-        'renderLargerThumbnail',
-        'showAdAttribution',
-      ]) {
-        if (Object.prototype.hasOwnProperty.call(externalAdReply, field)) {
-          visualPreview[field] = externalAdReply[field];
-        }
-      }
-    }
+    // Baileys increments the score. Restore only the visual card after it replaces contextInfo.
     return await this.sendMessageWithTyping(
       data.number,
       {
         forward: fullMessage,
         force: true,
-        ...(Object.keys(visualPreview).length > 0 ? { contextInfo: { externalAdReply: visualPreview } } : {}),
+        ...(externalAdReply ? { contextInfo: { externalAdReply } } : {}),
       },
       {},
     );
@@ -4335,15 +4368,21 @@ export class BaileysStartupService extends ChannelStartupService {
               new BadRequestException('You cannot edit deleted messages');
             }
 
+            // Drop the old card and its text copy only in the updated record, after a successful send.
+            const updatedMessage = { ...oldMessage.message };
+            delete updatedMessage.__evolutionForwardPreview;
             if (oldMessage.messageType === 'conversation' || oldMessage.messageType === 'extendedTextMessage') {
-              oldMessage.message.conversation = data.text;
+              updatedMessage.conversation = data.text;
             } else {
-              oldMessage.message[oldMessage.messageType].caption = data.text;
+              updatedMessage[oldMessage.messageType] = {
+                ...updatedMessage[oldMessage.messageType],
+                caption: data.text,
+              };
             }
             message = await this.prismaRepository.message.update({
               where: { id: message.id },
               data: {
-                message: oldMessage.message,
+                message: updatedMessage,
                 status: 'EDITED',
                 messageTimestamp: Math.floor(Date.now() / 1000), // Convert to int32 by dividing by 1000 to get seconds
               },

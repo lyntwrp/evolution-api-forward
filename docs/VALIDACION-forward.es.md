@@ -120,3 +120,42 @@ No se construyó una imagen Docker ni se desplegó el servicio durante esta
 validación. No se conectó una cuenta WhatsApp ni se enviaron mensajes reales.
 La vista previa ordinaria requiere un mensaje nuevo recibido después del
 despliegue; la prueba visual en el teléfono queda pendiente.
+
+## Correcciones de seguridad del 23 de octubre de 2026
+
+La auditoría posterior del commit `fd8d008c` reprodujo dos defectos:
+
+1. Se validaba el tipo principal, pero se entregaba a Baileys todo el mensaje
+   almacenado. Podían acompañarlo claves de distribución de grupo o un segundo
+   contenido con citas privadas.
+2. La edición por API conservaba el campo auxiliar de vista previa y su texto
+   anterior, aunque el texto principal ya hubiera cambiado.
+
+El reenvío reconstruye ahora un único contenido permitido. Excluye metadatos de
+claves y transporte, rechaza contenidos ambiguos y limpia el contexto original,
+también en contactos anidados. Conserva los campos de tarjeta, miniatura normal
+y HQ, bytes multimedia y el contador que Baileys incrementa una sola vez. La
+edición guarda una copia del mensaje sin el campo auxiliar obsoleto después de
+un envío exitoso, sin mutar el objeto anterior si la persistencia falla.
+
+Validación ejecutada:
+
+- **27 pruebas aprobadas** con código real del servicio y protobuf/generación
+  real de Baileys, y base/transporte/webhooks simulados.
+- Regresión de recepción de grupo, almacenamiento JSON y reenvío: datos de
+  distribución de claves sintéticos ausentes del mensaje generado y de su
+  segundo guardado; tarjeta y miniatura HQ conservadas.
+- Los once tipos permitidos siguen funcionando; contenido múltiple, tipos
+  desconocidos y controles mezclados se rechazan antes de enviar.
+- La edición exitosa elimina el campo auxiliar y la consulta posterior no lo
+  devuelve. Mensajes sin editar y fallos de envío/guardado conservan la tarjeta.
+- TypeScript, lint completo y bundle CJS de `src/main.ts` con heap V8 de 512 MiB
+  comprobados antes de publicar esta corrección.
+
+No hay cambios de endpoint, credenciales, dependencias, lockfile, Prisma o
+Compose. No se ejecutó una limpieza retroactiva de registros editados antes de
+esta corrección, ni se enviaron mensajes reales o se accedió a producción. La
+prueba visual posterior corresponde a la instancia de laboratorio del usuario.
+Baileys sigue en la versión oficial base `7.0.0-rc.9`; sus avisos de seguridad
+heredados requieren un cambio separado. Estas pruebas no certifican la seguridad
+general de Evolution o de sus dependencias.
