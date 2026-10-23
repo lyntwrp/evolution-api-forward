@@ -127,6 +127,8 @@ export class WebhookController extends EventController implements EventControlle
             const httpService = axios.create({
               baseURL,
               headers: webhookHeaders as Record<string, string> | undefined,
+              // Do not forward custom credentials to a redirect destination.
+              ...(Object.keys(webhookHeaders).length > 0 ? { maxRedirects: 0 } : {}),
               timeout: webhookConfig.REQUEST?.TIMEOUT_MS ?? 30000,
             });
 

@@ -1,0 +1,283 @@
+diff --git a/src/pages/instance/Webhook/headers.ts b/src/pages/instance/Webhook/headers.ts
+new file mode 100644
+index 0000000..821a9e7
+--- /dev/null
++++ b/src/pages/instance/Webhook/headers.ts
+@@ -0,0 +1,40 @@
++import { z } from "zod";
++
++const headerNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
++
++export const headerRowsSchema = z
++  .array(
++    z.object({
++      name: z
++        .string()
++        .min(1, "Enter a header name")
++        .max(128)
++        .regex(headerNamePattern, "Invalid HTTP header name")
++        .refine((name) => !["__proto__", "prototype", "constructor"].includes(name.toLowerCase()), "Reserved header name"),
++      value: z
++        .string()
++        .min(1, "Enter the header value or remove this header")
++        .max(8192)
++        .refine((value) => !/[\r\n\0]/.test(value), "Header values cannot contain line breaks"),
++    }),
++  )
++  .superRefine((rows, context) => {
++    const names = new Set<string>();
++    rows.forEach((row, index) => {
++      const name = row.name.toLowerCase();
++      if (names.has(name)) {
++        context.addIssue({ code: z.ZodIssueCode.custom, path: [index, "name"], message: "Header names must be unique" });
++      }
++      names.add(name);
++    });
++  });
++
++export type HeaderRow = z.infer<typeof headerRowsSchema>[number];
++
++export function headersToRows(headers?: Record<string, string> | null): HeaderRow[] {
++  return Object.entries(headers ?? {}).map(([name, value]) => ({ name, value }));
++}
++
++export function rowsToHeaders(rows: HeaderRow[]): Record<string, string> {
++  return Object.fromEntries(headerRowsSchema.parse(rows).map(({ name, value }) => [name, value]));
++}
+diff --git a/src/pages/instance/Webhook/index.tsx b/src/pages/instance/Webhook/index.tsx
+index 83e6f8b..b0000c8 100644
+--- a/src/pages/instance/Webhook/index.tsx
++++ b/src/pages/instance/Webhook/index.tsx
+@@ -2,7 +2,7 @@
+ import { zodResolver } from "@hookform/resolvers/zod";
+ import { Separator } from "@radix-ui/react-dropdown-menu";
+ import { useEffect, useState } from "react";
+-import { useForm } from "react-hook-form";
++import { useFieldArray, useForm } from "react-hook-form";
+ import { useTranslation } from "react-i18next";
+ import { toast } from "react-toastify";
+ import { z } from "zod";
+@@ -20,12 +20,15 @@ import { cn } from "@/lib/utils";
+ 
+ import { Webhook as WebhookType } from "@/types/evolution.types";
+ 
++import { headerRowsSchema, headersToRows, rowsToHeaders } from "./headers";
++
+ const FormSchema = z.object({
+   enabled: z.boolean(),
+   url: z.string().url("Invalid URL format"),
+   events: z.array(z.string()),
+   base64: z.boolean(),
+   byEvents: z.boolean(),
++  headers: headerRowsSchema,
+ });
+ 
+ type FormSchemaType = z.infer<typeof FormSchema>;
+@@ -36,7 +39,11 @@ function Webhook() {
+   const [loading, setLoading] = useState(false);
+ 
+   const { createWebhook } = useManageWebhook();
+-  const { data: webhook } = useFetchWebhook({
++  const {
++    data: webhook,
++    isLoading: loadingWebhook,
++    isError: loadError,
++  } = useFetchWebhook({
+     instanceName: instance?.name,
+     token: instance?.token,
+   });
+@@ -49,8 +56,17 @@ function Webhook() {
+       events: [],
+       base64: false,
+       byEvents: false,
++      headers: [],
+     },
+   });
++  const {
++    fields: headerFields,
++    append: addHeader,
++    remove: removeHeader,
++  } = useFieldArray({
++    control: form.control,
++    name: "headers",
++  });
+ 
+   useEffect(() => {
+     if (webhook) {
+@@ -60,9 +76,13 @@ function Webhook() {
+         events: webhook.events,
+         base64: webhook.webhookBase64,
+         byEvents: webhook.webhookByEvents,
++        headers: headersToRows(webhook.headers),
+       });
++    } else {
++      // Never carry another instance's credentials into an empty configuration.
++      form.reset({ enabled: false, url: "", events: [], base64: false, byEvents: false, headers: [] });
+     }
+-  }, [webhook]); // eslint-disable-line react-hooks/exhaustive-deps
++  }, [webhook, instance?.id, form]);
+ 
+   const onSubmit = async (data: FormSchemaType) => {
+     if (!instance) return;
+@@ -74,6 +94,7 @@ function Webhook() {
+         events: data.events,
+         base64: data.base64,
+         byEvents: data.byEvents,
++        headers: rowsToHeaders(data.headers),
+       };
+ 
+       await createWebhook({
+@@ -83,8 +104,9 @@ function Webhook() {
+       });
+       toast.success(t("webhook.toast.success"));
+     } catch (error: any) {
+-      console.error(t("webhook.toast.error"), error);
+-      toast.error(`Error: ${error?.response?.data?.response?.message}`);
++      // Axios errors can contain the request body, including header credentials.
++      const status = error?.response?.status;
++      toast.error(`${t("webhook.toast.error")}${typeof status === "number" ? ` (HTTP ${status})` : ""}`);
+     } finally {
+       setLoading(false);
+     }
+@@ -139,6 +161,36 @@ function Webhook() {
+               <FormInput name="url" label="URL">
+                 <Input />
+               </FormInput>
++              <section className="space-y-4" aria-labelledby="webhook-header-auth-title">
++                <div>
++                  <h4 id="webhook-header-auth-title" className="font-medium">
++                    {t("webhook.headers.title")}
++                  </h4>
++                  <p className="mt-1 text-sm text-muted-foreground">{t("webhook.headers.description")}</p>
++                </div>
++                {headerFields.length === 0 && <p className="text-sm text-muted-foreground">{t("webhook.headers.empty")}</p>}
++                {headerFields.map((header, index) => (
++                  <div key={header.id} className="grid items-start gap-3 rounded-md border p-3 md:grid-cols-[1fr_1fr_auto]">
++                    <FormInput name={`headers.${index}.name`} label={t("webhook.headers.name")}>
++                      <Input placeholder="X-Evolution-Webhook-Token" autoComplete="off" spellCheck={false} />
++                    </FormInput>
++                    <FormInput name={`headers.${index}.value`} label={t("webhook.headers.value")}>
++                      <Input type="password" autoComplete="new-password" spellCheck={false} />
++                    </FormInput>
++                    <Button type="button" variant="outline" className="md:mt-8" onClick={() => removeHeader(index)}>
++                      {t("webhook.headers.remove")}
++                    </Button>
++                  </div>
++                ))}
++                <Button type="button" variant="outline" disabled={loadingWebhook || loadError} onClick={() => addHeader({ name: "X-Evolution-Webhook-Token", value: "" })}>
++                  {t("webhook.headers.add")}
++                </Button>
++                {loadError && (
++                  <p role="alert" className="text-sm text-destructive">
++                    {t("webhook.headers.loadError")}
++                  </p>
++                )}
++              </section>
+               <FormSwitch name="byEvents" label={t("webhook.form.byEvents.label")} className="w-full justify-between" helper={t("webhook.form.byEvents.description")} />
+               <FormSwitch name="base64" label={t("webhook.form.base64.label")} className="w-full justify-between" helper={t("webhook.form.base64.description")} />
+               <div className="mb-4 flex justify-between">
+@@ -182,7 +234,7 @@ function Webhook() {
+             </div>
+ 
+             <div className="mx-4 flex justify-end pt-6">
+-              <Button type="submit" disabled={loading}>
++              <Button type="submit" disabled={loading || loadingWebhook || loadError || !instance}>
+                 {loading ? t("webhook.button.saving") : t("webhook.button.save")}
+               </Button>
+             </div>
+diff --git a/src/translate/languages/en-US.json b/src/translate/languages/en-US.json
+index f63d13e..98fa1fa 100644
+--- a/src/translate/languages/en-US.json
++++ b/src/translate/languages/en-US.json
+@@ -259,6 +259,16 @@
+     "button": {
+       "save": "Save",
+       "saving": "Saving..."
++    },
++    "headers": {
++      "title": "Header authentication",
++      "description": "Send a secret header to authenticate this webhook in n8n. Use HTTPS and a token different from the Evolution API key.",
++      "empty": "No custom headers configured.",
++      "name": "Header name",
++      "value": "Token / value",
++      "remove": "Remove",
++      "add": "Add header",
++      "loadError": "Could not load existing settings. Reload before saving."
+     }
+   },
+   "websocket": {
+diff --git a/src/translate/languages/es-ES.json b/src/translate/languages/es-ES.json
+index 1dc881f..22c3509 100644
+--- a/src/translate/languages/es-ES.json
++++ b/src/translate/languages/es-ES.json
+@@ -239,6 +239,16 @@
+     "button": {
+       "save": "Guardar",
+       "saving": "Guardando..."
++    },
++    "headers": {
++      "title": "Autenticación por cabecera",
++      "description": "Envía una cabecera secreta para autenticar este webhook en n8n. Usa HTTPS y un token distinto de la API key de Evolution.",
++      "empty": "No hay cabeceras personalizadas.",
++      "name": "Nombre de la cabecera",
++      "value": "Token / valor",
++      "remove": "Eliminar",
++      "add": "Añadir cabecera",
++      "loadError": "No se pudo cargar la configuración existente. Recarga antes de guardar."
+     }
+   },
+   "websocket": {
+diff --git a/src/translate/languages/fr-FR.json b/src/translate/languages/fr-FR.json
+index 7b36399..aef9630 100644
+--- a/src/translate/languages/fr-FR.json
++++ b/src/translate/languages/fr-FR.json
+@@ -238,6 +238,16 @@
+     "button": {
+       "save": "Enregistrer",
+       "saving": "Enregistrement..."
++    },
++    "headers": {
++      "title": "Authentification par en-tête",
++      "description": "Envoyez un en-tête secret pour authentifier ce webhook dans n8n. Utilisez HTTPS et un jeton différent de la clé API Evolution.",
++      "empty": "Aucun en-tête personnalisé.",
++      "name": "Nom de l’en-tête",
++      "value": "Jeton / valeur",
++      "remove": "Supprimer",
++      "add": "Ajouter un en-tête",
++      "loadError": "Impossible de charger la configuration. Rechargez avant d’enregistrer."
+     }
+   },
+   "websocket": {
+diff --git a/src/translate/languages/pt-BR.json b/src/translate/languages/pt-BR.json
+index 7943d44..b391f3e 100644
+--- a/src/translate/languages/pt-BR.json
++++ b/src/translate/languages/pt-BR.json
+@@ -239,6 +239,16 @@
+     "button": {
+       "save": "Salvar",
+       "saving": "Salvando..."
++    },
++    "headers": {
++      "title": "Autenticação por cabeçalho",
++      "description": "Envie um cabeçalho secreto para autenticar este webhook no n8n. Use HTTPS e um token diferente da API key do Evolution.",
++      "empty": "Nenhum cabeçalho personalizado.",
++      "name": "Nome do cabeçalho",
++      "value": "Token / valor",
++      "remove": "Remover",
++      "add": "Adicionar cabeçalho",
++      "loadError": "Não foi possível carregar a configuração existente. Recarregue antes de salvar."
+     }
+   },
+   "websocket": {
+diff --git a/src/types/evolution.types.ts b/src/types/evolution.types.ts
+index 67aceac..e90df9a 100644
+--- a/src/types/evolution.types.ts
++++ b/src/types/evolution.types.ts
+@@ -333,6 +333,7 @@ export type TypebotSettings = {
+ 
+ export type Webhook = {
+   id?: string;
++  headers?: Record<string, string> | null;
+   enabled: boolean;
+   url: string;
+   events: string[];

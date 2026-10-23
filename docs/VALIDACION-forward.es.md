@@ -159,3 +159,42 @@ prueba visual posterior corresponde a la instancia de laboratorio del usuario.
 Baileys sigue en la versión oficial base `7.0.0-rc.9`; sus avisos de seguridad
 heredados requieren un cambio separado. Estas pruebas no certifican la seguridad
 general de Evolution o de sus dependencias.
+
+## R2: Webhook y preparación de producción — 23 de octubre de 2026
+
+R1 (`30ee9e1d1b60ce0af462546c666ff0f1fdbacbb7`) quedó probada visualmente por
+el usuario después de las correcciones anteriores. R2 conserva ese código de
+reenvío y sus dependencias. Añade edición de cabeceras en Manager, protección de
+redirecciones para webhooks con cabeceras, guías y Compose de producción separado.
+
+Validación de R2:
+
+- 36 pruebas aprobadas: 27 del reenvío, 7 de transporte/persistencia de cabeceras
+  y 2 del conversor/validador del formulario extraído de su parche publicado.
+- Controladores y Axios reales contra receptores locales: token correcto → 200,
+  ausente/incorrecto → 401; cabeceras preservadas en configuración y ausentes del
+  cuerpo JSON y de los registros capturados; redirecciones 302/307 bloqueadas
+  cuando hay credenciales. Los webhooks sin cabeceras conservan sus redirecciones.
+- Navegador con API local simulada: añadir, guardar y recargar token; conservar
+  una cabecera previa y `MESSAGES_UPSERT`; valores ocultos y traducción española.
+  Se utilizaron exclusivamente nombres, URL y tokens ficticios.
+- Compilación TypeScript, lint completo del backend y bundle CJS usados por el
+  Dockerfile aprobados (heap V8 de 512 MiB para el bundle).
+- Manager compilado con su lockfile original; lint de los archivos TypeScript
+  modificados aprobado. Reconstrucción mediante el script publicado y comprobación
+  de hashes del bundle. Avisos de tamaño del bundle y datos Browserslist antiguos
+  conservados; no se actualizaron dependencias para silenciarlos.
+- `package.json`, `package-lock.json`, Prisma y el gitlink del Manager permanecen
+  iguales a R1. El servicio Baileys y los demás archivos del reenvío no cambian.
+- Compose revisado estáticamente: API/PostgreSQL/Redis propios, variables obligatorias,
+  volúmenes sin nombres externos y PostgreSQL/Redis sin puertos publicados.
+
+Docker no está disponible en el equipo de validación: no se ejecutó `docker compose
+config`, no se construyó una imagen ni se probó el arranque de contenedores R2.
+La prueba local del Manager no sustituye la comprobación en el despliegue de
+pruebas con n8n real y un nuevo mensaje WhatsApp. No se accedió ni desplegó producción.
+
+El diagnóstico de Integrations reproduce el rechazo 400 por módulos desactivados
+con el Compose del laboratorio; no verifica la respuesta del servidor remoto.
+Consulta [el diagnóstico](DIAGNOSTICO-integrations.es.md) y
+[la guía de Header Auth](WEBHOOK-HEADER-AUTH.es.md).

@@ -1,5 +1,21 @@
 <h1 align="center">Evolution Api</h1>
 
+## Fork forwardMessage — Evolution API 2.3.7
+
+Este fork conserva las dependencias oficiales de 2.3.7, incluido Baileys
+`7.0.0-rc.9`. R1 identifica el reenvío con vistas previas probado; R2 añade
+Header Auth en el Manager y configuración para una instalación independiente.
+Conserva riesgos de seguridad conocidos: formalizar una versión no los corrige.
+
+- [Versiones y riesgos pendientes](docs/RELEASES-forward.es.md)
+- [Instalar un recurso nuevo en Coolify](deploy/forward-production/README.es.md)
+- [Configurar Header Auth entre Evolution y n8n](docs/WEBHOOK-HEADER-AUTH.es.md)
+- [Diagnóstico de Integrations](docs/DIAGNOSTICO-integrations.es.md)
+- [Fuente reproducible del Manager](manager-customization/README.es.md)
+- [Validación y límites de las pruebas](docs/VALIDACION-forward.es.md)
+
+La imagen oficial enlazada a continuación no incluye los cambios de este fork.
+
 <div align="center">
 
 [![Docker Image](https://img.shields.io/badge/Docker-image-blue)](https://hub.docker.com/r/evoapicloud/evolution-api)

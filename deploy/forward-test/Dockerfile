@@ -12,7 +12,7 @@ COPY tsconfig.json tsup.config.ts runWithProvider.js ./
 COPY src ./src
 COPY prisma ./prisma
 COPY public ./public
-# These compiled manager assets are already tracked by official v2.3.7.
+# Use the tracked Manager bundle (R2 source/provenance: manager-customization/).
 COPY manager ./manager
 
 # Prisma generation validates a URI but does not connect to this dummy database.

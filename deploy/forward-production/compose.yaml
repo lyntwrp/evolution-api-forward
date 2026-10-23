@@ -1,0 +1,146 @@
+# Build only the selected frozen release in a NEW standalone Coolify resource.
+# The test Dockerfile is deliberately reused without runtime/dependency changes.
+# Compose automatically prefixes unnamed networks/volumes with its project name.
+# Deliberately no container_name, host ports, shared names, or external resources.
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/forward-test/Dockerfile
+      args:
+        SOURCE_REVISION: ${FORWARD_PROD_SOURCE_REVISION:-unrecorded}
+      labels:
+        org.opencontainers.image.title: Evolution API forwardMessage
+        org.opencontainers.image.version: ${FORWARD_PROD_RELEASE:-forward-2-3-7-r2}
+        org.opencontainers.image.revision: ${FORWARD_PROD_SOURCE_REVISION:-unrecorded}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose:
+      - "8080"
+    environment:
+      SERVER_NAME: ${FORWARD_PROD_SERVER_NAME:-evolution-forward-production}
+      SERVER_TYPE: http
+      SERVER_PORT: "8080"
+      SERVER_URL: ${FORWARD_PROD_SERVER_URL:?}
+      AUTHENTICATION_API_KEY: ${FORWARD_PROD_API_KEY:?}
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "false"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://forward_prod:${FORWARD_PROD_POSTGRES_PASSWORD:?}@postgres:5432/forward_prod?schema=public
+      DATABASE_CONNECTION_CLIENT_NAME: evolution_forward_prod
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_HISTORIC: "true"
+      DATABASE_SAVE_DATA_LABELS: "false"
+      DATABASE_DELETE_MESSAGE: "true"
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://:${FORWARD_PROD_REDIS_PASSWORD:?}@redis:6379/0
+      CACHE_REDIS_PREFIX_KEY: evolution_forward_prod
+      CACHE_REDIS_SAVE_INSTANCES: "false"
+      CACHE_LOCAL_ENABLED: "false"
+      CONFIG_SESSION_PHONE_CLIENT: ${FORWARD_PROD_PHONE_CLIENT:-Evolution API forwardMessage}
+      CONFIG_SESSION_PHONE_NAME: Chrome
+      DEL_INSTANCE: "false"
+      # v2.3.7 rejects requests without Origin unless this contains '*'.
+      # n8n and the local healthcheck normally send no Origin header.
+      CORS_ORIGIN: "*"
+      CORS_CREDENTIALS: "false"
+      LOG_LEVEL: ERROR,WARN,INFO
+      LOG_BAILEYS: error
+      TELEMETRY_ENABLED: "false"
+      SENTRY_DSN: ""
+      PROMETHEUS_METRICS: "false"
+      WEBHOOK_GLOBAL_ENABLED: "false"
+      RABBITMQ_ENABLED: ${FORWARD_PROD_RABBITMQ_ENABLED:-false}
+      SQS_ENABLED: ${FORWARD_PROD_SQS_ENABLED:-false}
+      KAFKA_ENABLED: ${FORWARD_PROD_KAFKA_ENABLED:-false}
+      NATS_ENABLED: ${FORWARD_PROD_NATS_ENABLED:-false}
+      WEBSOCKET_ENABLED: ${FORWARD_PROD_WEBSOCKET_ENABLED:-false}
+      PUSHER_ENABLED: ${FORWARD_PROD_PUSHER_ENABLED:-false}
+      TYPEBOT_ENABLED: ${FORWARD_PROD_TYPEBOT_ENABLED:-false}
+      CHATWOOT_ENABLED: ${FORWARD_PROD_CHATWOOT_ENABLED:-false}
+      OPENAI_ENABLED: ${FORWARD_PROD_OPENAI_ENABLED:-false}
+      DIFY_ENABLED: ${FORWARD_PROD_DIFY_ENABLED:-false}
+      N8N_ENABLED: ${FORWARD_PROD_N8N_ENABLED:-false}
+      EVOAI_ENABLED: ${FORWARD_PROD_EVOAI_ENABLED:-false}
+      FLOWISE_ENABLED: ${FORWARD_PROD_FLOWISE_ENABLED:-false}
+      S3_ENABLED: ${FORWARD_PROD_S3_ENABLED:-false}
+      LANGUAGE: en
+    volumes:
+      - forward_prod_instances:/evolution/instances
+    networks:
+      - production-backend
+      - production-egress
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8080/manager/',{signal:AbortSignal.timeout(8000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    labels:
+      io.evolution.forward-production.role: api
+      io.evolution.forward-production.upstream: v2.3.7
+
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: forward_prod
+      POSTGRES_USER: forward_prod
+      POSTGRES_PASSWORD: ${FORWARD_PROD_POSTGRES_PASSWORD:?}
+    volumes:
+      - forward_prod_postgres:/var/lib/postgresql/data
+    networks:
+      - production-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    labels:
+      io.evolution.forward-production.role: postgres
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${FORWARD_PROD_REDIS_PASSWORD:?}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - forward_prod_redis:/data
+    networks:
+      - production-backend
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    labels:
+      io.evolution.forward-production.role: redis
+
+volumes:
+  forward_prod_instances:
+    labels:
+      io.evolution.forward-production.role: whatsapp-sessions
+  forward_prod_postgres:
+    labels:
+      io.evolution.forward-production.role: postgres-data
+  forward_prod_redis:
+    labels:
+      io.evolution.forward-production.role: redis-data
+
+networks:
+  production-backend:
+    internal: true
+  production-egress:
+    driver: bridge

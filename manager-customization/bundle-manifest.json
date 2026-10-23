@@ -1,0 +1,10 @@
+{
+  "upstream": "f054b9bc28083152d4948f835e3346fd0add39db",
+  "patchSha256": "60bb3ff59acd812b017cbf51b6b086c1b5a8d1c909092b29a0a152e741eabdaf",
+  "files": {
+    "assets/images/evolution-logo.png": "b18b4871b684f6d59389e0f78ac621dd35de98a096b1947f5c07f9d57aaee2fc",
+    "assets/index-C0fj6i4B.css": "619a587974b80dc33ea799afcca3cb2c9f1bc0a90859a1bc69b776e7324183c2",
+    "assets/index-C3lMZeAd.js": "ffdedcdc4efee2bf760fadc92f3f28279111113d01a1814708dfa18c1a2fbe60",
+    "index.html": "c6609881d00d15eb63714bd692bac15365621a096c72784da862743263588e82"
+  }
+}

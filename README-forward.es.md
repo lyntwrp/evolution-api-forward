@@ -1,13 +1,15 @@
 # Evolution API 2.3.7 + forwardMessage
 
-Fork de prueba basado en el tag oficial **2.3.7**, commit
-`cd800f2976e1e5b682fbf86a01ee4d85ae61f370`. Incorpora únicamente el reenvío
-propuesto en el [PR #2595](https://github.com/evolution-foundation/evolution-api/pull/2595),
-adaptado para conservar el flujo habitual de envío y limitar los riesgos del endpoint nuevo.
-No se han cambiado dependencias, migraciones, autenticación global ni funciones de grupos.
-Los cinco archivos modificados en `src/` contienen solo las adiciones relacionadas con reenvío.
+Fork basado en el tag oficial **2.3.7**, commit
+`cd800f2976e1e5b682fbf86a01ee4d85ae61f370`. Del
+[PR #2595](https://github.com/evolution-foundation/evolution-api/pull/2595)
+incorpora únicamente el reenvío, adaptado para conservar el flujo habitual y
+limitar los riesgos del endpoint. R1 incluye la conservación de tarjetas y las
+correcciones probadas. R2 añade Header Auth en Manager, bloqueo de redirecciones
+con cabeceras y preparación de producción independiente, a petición del usuario.
+No cambia dependencias, migraciones, autenticación global ni funciones de grupos.
 
-**Uso de laboratorio.** La revisión no encontró indicios explícitos de código malicioso
+**Riesgos pendientes.** La revisión no encontró indicios explícitos de código malicioso
 en el diff, pero no garantiza seguridad. La base exacta conserva dependencias con
 avisos conocidos, incluido Baileys rc.9 afectado por
 [GHSA-qvv5-jq5g-4cgg](https://github.com/advisories/GHSA-qvv5-jq5g-4cgg).
@@ -20,9 +22,13 @@ en producción, ni se han copiado sus secretos o sesiones.
 - [Coolify: Dockerfile y Compose aislados](deploy/forward-test/README.es.md)
 - [Nodos de ejemplo para importar en una copia del flujo n8n](examples/n8n-forward-test.json)
 - [Fork y publicación en GitHub](docs/GITHUB-forward.es.md)
+- [Versiones congeladas y alcance](docs/RELEASES-forward.es.md)
+- [Producción independiente en Coolify](deploy/forward-production/README.es.md)
+- [Header Auth con n8n](docs/WEBHOOK-HEADER-AUTH.es.md)
+- [Diagnóstico de Integrations](docs/DIAGNOSTICO-integrations.es.md)
 
 La licencia, los avisos y los recursos de marca del upstream se conservan.
-Este es un derivado independiente para pruebas, no una versión oficial publicada por Evolution.
+Este es un derivado independiente, no una versión oficial publicada por Evolution.
 La propuesta de reenvío se atribuye a `alpesdigital-adm` en el PR #2595;
 las adaptaciones y sus límites están descritos en la auditoría.
 

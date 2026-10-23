@@ -3,3 +3,6 @@ docs/audit/pr-2595.diff -text -diff
 docs/audit/npm-audit.json -text -diff
 deploy/forward-test/Dockerfile text eol=lf
 deploy/forward-test/Dockerfile.dockerignore text eol=lf
+manager-customization/*.patch text eol=lf whitespace=-blank-at-eol
+# Preserve generated bundle bytes across Windows/Linux checkouts for the manifest.
+manager/dist/** -text whitespace=-blank-at-eol,-space-before-tab
