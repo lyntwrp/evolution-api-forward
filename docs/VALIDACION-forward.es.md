@@ -4,7 +4,7 @@ Fecha: 22 de octubre de 2026. Base: etiqueta oficial `2.3.7`, commit
 `cd800f2976e1e5b682fbf86a01ee4d85ae61f370`. Head del PR inspeccionado:
 `2765f4288561d9da55f4e3e9c1f9c41a72dc138b`.
 
-## Resultados ejecutados
+## Resultados iniciales ejecutados
 
 | Comprobación | Resultado |
 |---|---|
@@ -87,3 +87,36 @@ conservan. `src`, dependencias, lockfile y Prisma siguen intactos respecto a la
 implementación revisada. No se inició el bundle ni se accedió a producción para
 esta comprobación. La construcción Linux y el arranque corregidos se deben
 confirmar en el siguiente despliegue de pruebas.
+
+## Corrección de la vista previa al reenviar
+
+La prueba del usuario confirmó la entrega y la marca de reenviado, pero sin la
+tarjeta del enlace. Se reprodujo localmente la pérdida: el normalizador oficial
+elimina `extendedTextMessage` antes del guardado, y la operación de reenvío de
+Baileys no vuelve a generar una tarjeta a partir del enlace.
+
+Se cambió únicamente el servicio Baileys para conservar campos de vista previa
+en el JSON de almacenamiento y reconstruirlos en `forwardMessage`. Los objetos
+de webhook y Chatwoot conservan su formato anterior. Se cubren recepción,
+envío e importación del historial. No hay cambios de esquema, migraciones,
+dependencias, rutas, autenticación o contrato HTTP. Los campos visuales de
+`externalAdReply` se conservan por separado sin restaurar contexto innecesario.
+Las tarjetas de enlace se invalidan si cambia el texto, y las contextuales se
+omiten cuando el registro está marcado como editado.
+
+Validación de esta corrección:
+
+- **21 pruebas aprobadas** en `tests/forward-message.test.cjs`, con código real
+  del servicio y generación/protobuf de Baileys, persistencia y transporte simulados.
+- Incluye la ruta de tarjeta con miniatura normal y de alta calidad, ida y vuelta
+  por JSON, búsqueda limitada a la instancia, reenvío y segundo guardado.
+- Comprueba la marca/contador, texto anterior sin tarjeta, ausencia de la copia
+  interna en el mensaje enviado y el webhook, y omisión de tarjetas obsoletas.
+- **TypeScript y lint completos aprobados.** El bundle CJS de `src/main.ts`,
+  equivalente al usado por el Dockerfile de pruebas, se generó correctamente
+  con heap V8 de 512 MiB.
+
+No se construyó una imagen Docker ni se desplegó el servicio durante esta
+validación. No se conectó una cuenta WhatsApp ni se enviaron mensajes reales.
+La vista previa ordinaria requiere un mensaje nuevo recibido después del
+despliegue; la prueba visual en el teléfono queda pendiente.

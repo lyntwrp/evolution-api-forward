@@ -74,6 +74,40 @@ instancia; no añade filtro por chat origen ni una clave única. IDs duplicados
 entre chats de una misma instancia serían ambiguos. El alcance mantiene ese
 getter sin modificarlo globalmente.
 
+## Conservación de la vista previa de enlaces
+
+La base 2.3.7 convierte `extendedTextMessage` en `conversation` antes de guardar,
+eliminando título, descripción y miniatura. Este fork conserva ahora una copia
+limitada de los campos originales de la tarjeta en
+`message.__evolutionForwardPreview`, dentro de la columna JSON existente.
+Se aplica al guardar mensajes recibidos, enviados e importados del historial.
+No cambia el formato del webhook ni la normalización que utilizan n8n y Chatwoot.
+La consulta autenticada de mensajes puede mostrar ese campo adicional en el JSON
+almacenado; no contiene claves de la API.
+
+`forwardMessage` reconstruye la tarjeta antes de generar el reenvío y elimina el
+campo reservado antes de entregar el mensaje a Baileys. También conserva los
+campos visuales de una tarjeta `externalAdReply` ya presente en el contexto,
+sin restaurar citas, menciones, identificadores publicitarios ni contadores
+anteriores. La marca de reenviado y su contador siguen a cargo de Baileys.
+
+La copia se liga al texto original para no reutilizar una tarjeta de enlace
+después de editarlo. En mensajes con estado `EDITED` se omite la tarjeta contextual
+anterior. Se guardan únicamente los campos de vista previa permitidos, incluidos
+los bytes y referencias de miniaturas de mayor resolución; no se descargan URLs
+para fabricar una tarjeta nueva.
+
+No requiere dependencias, migraciones ni cambios en el cuerpo del POST o el
+workflow. Para probar la tarjeta ordinaria debes desplegar esta corrección en
+el laboratorio y recibir un mensaje **nuevo** que ya muestre la vista previa.
+Los campos descartados por versiones anteriores no se pueden recuperar de esa
+fila. Una tarjeta contextual que ya esté en `contextInfo.externalAdReply` sí
+puede conservarse al reenviar ese registro, salvo el caso editado descrito arriba.
+
+La comprobación automatizada valida que los metadatos llegan a la generación de
+Baileys. La representación final en WhatsApp requiere una prueba real; las
+referencias de miniaturas o media originales pueden haber expirado.
+
 ## Adaptación a tu nodo HTTP actual
 
 Tu nodo ya usa `POST`, `url = {{ $json.url }}` y

@@ -165,6 +165,22 @@ export interface ExtendedIMessageKey extends proto.IMessageKey {
 
 const groupMetadataCache = new CacheService(new CacheEngine(configService, 'groups').getEngine());
 
+const forwardLinkPreviewFields = [
+  'matchedText',
+  'title',
+  'description',
+  'previewType',
+  'jpegThumbnail',
+  'doNotPlayInline',
+  'thumbnailDirectPath',
+  'thumbnailSha256',
+  'thumbnailEncSha256',
+  'mediaKey',
+  'mediaKeyTimestamp',
+  'thumbnailHeight',
+  'thumbnailWidth',
+] as const;
+
 // Adicione a função getVideoDuration no início do arquivo
 async function getVideoDuration(input: Buffer | string | Readable): Promise<number> {
   const MediaInfoFactory = (await import('mediainfo.js')).default;
@@ -599,8 +615,19 @@ export class BaileysStartupService extends ChannelStartupService {
         ),
       );
       const message = restored.message;
-      if (typeof message.conversation === 'string' && restored.contextInfo) {
+      const preview = message.__evolutionForwardPreview;
+      delete message.__evolutionForwardPreview;
+      const previewFields: Record<string, any> = {};
+      if (preview?.version === 1 && preview.text === message.conversation && preview.fields) {
+        for (const field of forwardLinkPreviewFields) {
+          if (Object.prototype.hasOwnProperty.call(preview.fields, field)) {
+            previewFields[field] = preview.fields[field];
+          }
+        }
+      }
+      if (typeof message.conversation === 'string' && (restored.contextInfo || Object.keys(previewFields).length > 0)) {
         message.extendedTextMessage = {
+          ...previewFields,
           text: message.conversation,
           contextInfo: restored.contextInfo,
         };
@@ -612,7 +639,37 @@ export class BaileysStartupService extends ChannelStartupService {
       throw new BadRequestException('Stored message cannot be forwarded');
     }
 
-    return await this.sendMessageWithTyping(data.number, { forward: fullMessage, force: true }, {});
+    // Baileys replaces contextInfo when forwarding. Restore only the original visual card,
+    // never old quotes, mentions, forwarding counters or advertising tracking identifiers.
+    const content = fullMessage.message[getContentType(fullMessage.message)] as any;
+    const externalAdReply = content?.contextInfo?.externalAdReply;
+    const visualPreview: Record<string, any> = {};
+    if (externalAdReply && String(stored.status) !== 'EDITED') {
+      for (const field of [
+        'title',
+        'body',
+        'mediaType',
+        'thumbnailUrl',
+        'mediaUrl',
+        'thumbnail',
+        'sourceUrl',
+        'renderLargerThumbnail',
+        'showAdAttribution',
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(externalAdReply, field)) {
+          visualPreview[field] = externalAdReply[field];
+        }
+      }
+    }
+    return await this.sendMessageWithTyping(
+      data.number,
+      {
+        forward: fullMessage,
+        force: true,
+        ...(Object.keys(visualPreview).length > 0 ? { contextInfo: { externalAdReply: visualPreview } } : {}),
+      },
+      {},
+    );
   }
 
   private async defineAuthState() {
@@ -1058,6 +1115,7 @@ export class BaileysStartupService extends ChannelStartupService {
         }
 
         const messagesRaw: any[] = [];
+        const messagesForStorage: any[] = [];
 
         const messagesRepository: Set<string> = new Set(
           chatwootImport.getRepositoryMessagesCache(instance) ??
@@ -1105,7 +1163,9 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
-          messagesRaw.push(this.prepareMessage(m));
+          const messageRaw = this.prepareMessage(m);
+          messagesRaw.push(messageRaw);
+          messagesForStorage.push(this.prepareMessageForStorage(messageRaw, m));
         }
 
         this.sendDataWebhook(Events.MESSAGES_SET, [...messagesRaw], true, undefined, {
@@ -1114,7 +1174,7 @@ export class BaileysStartupService extends ChannelStartupService {
         });
 
         if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
-          await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
+          await this.prismaRepository.message.createMany({ data: messagesForStorage, skipDuplicates: true });
         }
 
         if (
@@ -1416,7 +1476,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
           if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
             // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { pollUpdates, ...messageData } = messageRaw;
+            const { pollUpdates, ...messageData } = this.prepareMessageForStorage(messageRaw, received);
             const msg = await this.prismaRepository.message.create({ data: messageData });
 
             const { remoteJid } = received.key;
@@ -2522,7 +2582,9 @@ export class BaileysStartupService extends ChannelStartupService {
       }
 
       if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
-        const msg = await this.prismaRepository.message.create({ data: messageRaw });
+        const msg = await this.prismaRepository.message.create({
+          data: this.prepareMessageForStorage(messageRaw, messageSent),
+        });
 
         if (isMedia && this.configService.get<S3>('S3').ENABLE) {
           try {
@@ -4713,6 +4775,39 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     return obj;
+  }
+
+  private prepareMessageForStorage(messageRaw: any, originalMessage: proto.IWebMessageInfo): any {
+    const extendedText = originalMessage.message?.extendedTextMessage;
+    if (
+      !extendedText ||
+      typeof extendedText.text !== 'string' ||
+      extendedText.text !== messageRaw.message?.conversation
+    ) {
+      return messageRaw;
+    }
+
+    const fields: Record<string, any> = {};
+    for (const field of forwardLinkPreviewFields) {
+      if (Object.prototype.hasOwnProperty.call(extendedText, field) && extendedText[field] != null) {
+        fields[field] = extendedText[field];
+      }
+    }
+    if (Object.keys(fields).length === 0) return messageRaw;
+
+    // Persist only the original card in the existing JSON column. Webhook/Chatwoot
+    // objects keep their v2.3.7 shape, and edited text cannot reuse an obsolete card.
+    return {
+      ...messageRaw,
+      message: {
+        ...messageRaw.message,
+        __evolutionForwardPreview: {
+          version: 1,
+          text: extendedText.text,
+          fields: this.deserializeMessageBuffers(fields),
+        },
+      },
+    };
   }
 
   private prepareMessage(message: proto.IWebMessageInfo): any {
