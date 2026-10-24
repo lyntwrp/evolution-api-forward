@@ -571,6 +571,12 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async forwardMessage(data: ForwardMessageDto) {
+    if (
+      data.text !== undefined &&
+      (typeof data.text !== 'string' || data.text.length > 65536 || !/\S/.test(data.text))
+    ) {
+      throw new BadRequestException('Replacement text must contain 1 to 65536 characters and cannot be blank');
+    }
     const stored = (await this.getMessage({ id: data.messageId }, true)) as WAMessage & {
       contextInfo?: any;
       message: proto.IMessage & { __evolutionForwardPreview?: { version: number; text: string; fields: any } };
@@ -616,6 +622,14 @@ export class BaileysStartupService extends ChannelStartupService {
         : typeof sourceContent !== 'object' || Array.isArray(sourceContent)
     ) {
       throw new BadRequestException('Stored message cannot be forwarded');
+    }
+
+    const originalText = contentType === 'conversation' ? sourceContent : sourceContent.text;
+    if (
+      data.text !== undefined &&
+      (!['conversation', 'extendedTextMessage'].includes(contentType) || typeof originalText !== 'string')
+    ) {
+      throw new BadRequestException('Replacement text is only supported for text messages');
     }
 
     const sourceContext = contentType === 'conversation' ? stored.contextInfo : sourceContent.contextInfo;
@@ -691,6 +705,33 @@ export class BaileysStartupService extends ChannelStartupService {
       }
     } catch {
       throw new BadRequestException('Stored message cannot be forwarded');
+    }
+
+    if (data.text !== undefined) {
+      const textContent = fullMessage.message.extendedTextMessage;
+      if (data.text !== originalText) {
+        // Match entire URL tokens, never prefixes; do not fetch URLs or reuse an unrelated card.
+        const keepsUrl = (url: unknown) =>
+          typeof url === 'string' &&
+          url.length > 0 &&
+          originalText.split(/\s+/).includes(url) &&
+          data.text.split(/\s+/).includes(url);
+        const hasLinkPreview =
+          textContent &&
+          forwardLinkPreviewFields.some((field) => Object.prototype.hasOwnProperty.call(textContent, field));
+        if (
+          (hasLinkPreview && !keepsUrl(textContent.matchedText)) ||
+          (externalAdReply && !keepsUrl(externalAdReply.sourceUrl))
+        ) {
+          throw new BadRequestException('Replacement text must keep each original preview URL as a separate word');
+        }
+      }
+      // The protobuf is a detached copy: never edit the stored source or its preview sidecar.
+      if (textContent) {
+        textContent.text = data.text;
+      } else {
+        fullMessage.message.conversation = data.text;
+      }
     }
 
     // Baileys increments the score. Restore only the visual card after it replaces contextInfo.

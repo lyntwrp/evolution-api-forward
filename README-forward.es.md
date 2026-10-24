@@ -1,5 +1,10 @@
 # Evolution API 2.3.7 + forwardMessage
 
+**Rama de pruebas `test/forward-r2-edit-text`:** añade el campo opcional `text`
+para cambiar el texto al reenviar y conservar la tarjeta del mismo enlace.
+[Uso y comprobación en el laboratorio](docs/forward-message-edit-text-test.es.md).
+Los tags R1/R2 y la rama estable de R2 no cambian.
+
 Fork basado en el tag oficial **2.3.7**, commit
 `cd800f2976e1e5b682fbf86a01ee4d85ae61f370`. Del
 [PR #2595](https://github.com/evolution-foundation/evolution-api/pull/2595)

@@ -2,6 +2,10 @@
 
 ## Fork forwardMessage — Evolution API 2.3.7
 
+En la rama experimental `test/forward-r2-edit-text`, consulta la
+[opción para cambiar texto conservando el enlace](docs/forward-message-edit-text-test.es.md).
+Es una ampliación sobre R2 para probar antes de cualquier promoción.
+
 Este fork conserva las dependencias oficiales de 2.3.7, incluido Baileys
 `7.0.0-rc.9`. R1 identifica el reenvío con vistas previas probado; R2 añade
 Header Auth en el Manager y configuración para una instalación independiente.

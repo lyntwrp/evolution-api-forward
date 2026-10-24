@@ -198,3 +198,41 @@ El diagnóstico de Integrations reproduce el rechazo 400 por módulos desactivad
 con el Compose del laboratorio; no verifica la respuesta del servidor remoto.
 Consulta [el diagnóstico](DIAGNOSTICO-integrations.es.md) y
 [la guía de Header Auth](WEBHOOK-HEADER-AUTH.es.md).
+
+## Rama experimental: cambiar el texto del reenvío — 23 de octubre de 2026
+
+`test/forward-r2-edit-text` parte del commit R2
+`5ab35ef5c017909fbaeb330dde1fdfb347fcce5d`. Añade el campo opcional `text`
+al DTO/esquema de `forwardMessage` y sustituye el texto exclusivamente sobre
+la copia protobuf que se va a reenviar. La rama y el tag estable R2 no se modifican.
+
+Resultados ejecutados:
+
+- **47 pruebas aprobadas**: 38 de reenvío, 7 de cabeceras y 2 del Manager.
+  Se mantienen los casos anteriores y se añaden 11 casos sobre el texto opcional.
+- Validación de schema/HTTP/servicio: tipos, texto vacío/blanco/excesivo,
+  propiedades extra, autenticación y rechazo de query parameters.
+- Texto plano y `extendedTextMessage`; conservación de tarjeta nativa y
+  `externalAdReply`, título, descripción, bytes de miniatura y metadatos HQ,
+  puntuación de reenvío incrementada una vez y persistencia del nuevo texto.
+- Coincidencia exacta de cada URL en el texto original y en el nuevo, con
+  separadores de espacios/saltos de línea; comprobación de dos tarjetas a la vez.
+  URL cambiada, eliminada, prefijos/sufijos, query/fragmentos distintos y tarjeta
+  sin URL verificable se rechazan antes de enviar cuando se modifica el texto.
+- Mensajes sin `text` conservan los once tipos admitidos; solicitar sustitución
+  en tipos no textuales se rechaza. No se recuperan tarjetas obsoletas.
+- El registro fuente y su tarjeta quedan intactos tras éxito, rechazo o fallo
+  de envío. El evento y el mensaje nuevo usan el contenido reenviado actualizado.
+- TypeScript, lint completo y bundle CJS de la API aprobados. Comparación vacía
+  frente a R2 en dependencias, Prisma, Manager, rutas/controladores, webhooks,
+  Compose y métodos de grupos (los cambios de servicio se limitan a forwardMessage).
+
+La revisión del diff no encontró nuevas vulnerabilidades evidentes. La comprobación
+exacta de URL no realiza solicitudes externas ni interpola URLs en expresiones
+regulares. No es una garantía de seguridad de la base ni de sus dependencias.
+
+No se construyó una imagen Docker local ni se envió a WhatsApp. La visualización
+del texto nuevo y la tarjeta requiere la prueba del usuario en el recurso de
+laboratorio. El usuario ya confirmó previamente que R2 funciona con previews y
+Header Auth, pero esta ampliación no queda validada por aquella prueba anterior.
+Consulta [la guía de la rama experimental](forward-message-edit-text-test.es.md).

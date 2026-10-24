@@ -234,10 +234,16 @@ function assertPreviewMetadata(actual, expected) {
   assert.equal(Number(actual.mediaKeyTimestamp), Number(expected.mediaKeyTimestamp));
 }
 
-test('schema accepts group JIDs and phone numbers and rejects extra forwarding instructions', () => {
+test('schema accepts group JIDs, phone numbers and optional replacement text while rejecting extra instructions', () => {
   const valid = (body) => validate(Object.assign(new dto.ForwardMessageDto(), body), schema.forwardMessageSchema).valid;
   for (const number of ['120363000000002@g.us', '12345-67890@g.us', '5215555555555', '5215555555555@s.whatsapp.net']) {
     assert.equal(valid({ number, messageId: '3EB0ORIGINAL' }), true, number);
+  }
+  for (const text of ['Texto nuevo', '  Texto con espacios  ', 'Línea uno\nLínea dos', 'x'.repeat(65536)]) {
+    assert.equal(valid({ number: '123@g.us', messageId: '3EB0ORIGINAL', text }), true);
+  }
+  for (const text of [null, 123, true, {}, [], '', '   ', '\r\n\t', 'x'.repeat(65537)]) {
+    assert.equal(valid({ number: '123@g.us', messageId: '3EB0ORIGINAL', text }), false);
   }
   for (const body of [
     { number: '', messageId: 'id' }, { number: '120363000000002@g.us', messageId: '' },
@@ -248,6 +254,257 @@ test('schema accepts group JIDs and phone numbers and rejects extra forwarding i
     { number: '123@g.us', messageId: 'id', message: { conversation: 'injected' } },
     { number: '123@g.us', messageId: 'x'.repeat(201) },
   ]) assert.equal(valid(body), false, JSON.stringify(body));
+});
+
+test('optional text changes only the forwarded copy of plain or extended text', async () => {
+  const replacement = '  Mensaje personalizado\nhttps://example.test/nuevo  ';
+  for (const message of [{ conversation: 'Mensaje original' }, { extendedTextMessage: { text: 'Mensaje original' } }]) {
+    const f = fixture(message);
+    const before = JSON.stringify(f.saved);
+    const result = await f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text: replacement });
+    const forwarded = f.calls.sends[0].content.forward.message;
+    assert.equal(forwarded.conversation ?? forwarded.extendedTextMessage?.text, replacement);
+    assert.equal(result.message.conversation, replacement);
+    assert.equal(result.contextInfo.forwardingScore, 1);
+    assert.equal(result.contextInfo.isForwarded, true);
+    assert.equal(f.calls.saved[0].message.conversation, replacement);
+    assert.equal(f.calls.saved[0].message[previewSidecar], undefined);
+    assert.equal(Object.hasOwn(f.calls.generated[0].extendedTextMessage, 'title'), false);
+    assert.equal(JSON.stringify(f.saved), before);
+  }
+});
+
+test('service rejects invalid replacement text before looking up or sending a message', async () => {
+  for (const text of [null, 123, true, {}, [], '', '   ', '\r\n\t', 'x'.repeat(65537)]) {
+    const f = fixture();
+    const before = JSON.stringify(f.saved);
+    await assert.rejects(f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text }),
+      (error) => error.status === 400);
+    assert.equal(f.calls.queries.length, 0);
+    assert.equal(f.calls.sends.length, 0);
+    assert.equal(f.calls.saved.length, 0);
+    assert.equal(f.calls.webhooks.length, 0);
+    assert.equal(JSON.stringify(f.saved), before);
+  }
+});
+
+test('replacement text preserves the same stored URL card bytes and increments its forwarding score once', async () => {
+  for (const storedForm of ['sidecar', 'extendedTextMessage']) {
+    const original = originalLinkPreview();
+    const f = fixture(storedForm === 'extendedTextMessage' ? original.message : undefined);
+    if (storedForm === 'sidecar') await storeReceivedPreview(f, original);
+    const before = JSON.stringify(f.saved);
+    const originalBefore = JSON.stringify(original);
+    const replacement = 'Oferta de hoy\nhttps://example.test/noticia\nConsulta los detalles';
+    const result = await f.service.forwardMessage({ number: '120363000000002@g.us', messageId: '3EB0ORIGINAL', text: replacement });
+    const expected = { ...original.message.extendedTextMessage, text: replacement };
+    const forwarded = f.calls.sends[0].content.forward.message;
+    assertPreviewMetadata(forwarded.extendedTextMessage, expected);
+    assertPreviewMetadata(f.calls.generated[0].extendedTextMessage, expected);
+    assert.equal(forwarded[previewSidecar], undefined);
+    assert.equal(result.message[previewSidecar], undefined);
+    assert.equal(result.message.conversation, replacement);
+    assert.equal(result.contextInfo.forwardingScore, 4);
+    assert.equal(result.contextInfo.isForwarded, true);
+    const secondStorage = f.calls.saved.at(-1);
+    assert.equal(secondStorage.message[previewSidecar].text, replacement);
+    assert.equal(secondStorage.message[previewSidecar].fields.title, expected.title);
+    assert.deepEqual(Buffer.from(Object.values(secondStorage.message[previewSidecar].fields.jpegThumbnail)), previewBytes);
+    assert.equal(JSON.stringify(f.saved), before, storedForm);
+    assert.equal(JSON.stringify(original), originalBefore, storedForm);
+  }
+});
+
+test('replacement text preserves the visual externalAdReply while dropping quotes and tracking metadata', async () => {
+  const url = 'https://example.test/contextual';
+  const f = fixture({ conversation: `Original ${url}` }, { contextInfo: {
+    forwardingScore: 8,
+    quotedMessage: { conversation: 'Private quote' },
+    externalAdReply: {
+      sourceUrl: url,
+      title: 'Tarjeta contextual',
+      body: 'Descripcion contextual',
+      thumbnail: previewBytes,
+      mediaType: 1,
+      renderLargerThumbnail: true,
+      ctwaClid: 'PRIVATE_TRACKING',
+    },
+  } });
+  const before = JSON.stringify(f.saved);
+  const replacement = `Texto personalizado ${url}`;
+  const result = await f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text: replacement });
+  assert.equal(result.message.conversation, replacement);
+  assert.equal(result.contextInfo.forwardingScore, 9);
+  assert.equal(result.contextInfo.externalAdReply.sourceUrl, url);
+  assert.equal(result.contextInfo.externalAdReply.title, 'Tarjeta contextual');
+  assert.equal(result.contextInfo.externalAdReply.body, 'Descripcion contextual');
+  assert.deepEqual(Buffer.from(result.contextInfo.externalAdReply.thumbnail), previewBytes);
+  assert.equal(result.contextInfo.quotedMessage, undefined);
+  assert.equal(result.contextInfo.externalAdReply.ctwaClid, undefined);
+  assert.deepEqual(Object.keys(f.calls.sends[0].content.contextInfo), ['externalAdReply']);
+  assert.equal(JSON.stringify(f.saved), before);
+});
+
+test('card URL matching accepts whitespace boundaries without interpreting URL punctuation as a pattern', async () => {
+  const url = 'https://example.test/path?x=1+2&y=a.b';
+  for (const whitespace of ['\n', '\r\n', '\t', '\u00a0', '\u2003']) {
+    const f = fixture({ extendedTextMessage: {
+      text: `Original${whitespace}${url}${whitespace}detalle`,
+      matchedText: url,
+      title: 'Tarjeta conservada',
+      jpegThumbnail: previewBytes,
+    } });
+    const replacement = `Nuevo${whitespace}${url}${whitespace}detalle nuevo`;
+    const result = await f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text: replacement });
+    assert.equal(result.message.conversation, replacement);
+    assert.equal(f.calls.generated[0].extendedTextMessage.matchedText, url);
+    assert.equal(f.calls.generated[0].extendedTextMessage.title, 'Tarjeta conservada');
+    assert.deepEqual(Buffer.from(f.calls.generated[0].extendedTextMessage.jpegThumbnail), previewBytes);
+  }
+});
+
+test('when both kinds of URL card are present their distinct URLs must both survive replacement', async () => {
+  const nativeUrl = 'https://example.test/noticia';
+  const contextUrl = 'https://example.test/contextual';
+  const message = { extendedTextMessage: {
+    text: `Original ${nativeUrl} ${contextUrl}`,
+    matchedText: nativeUrl,
+    title: 'Tarjeta nativa',
+    jpegThumbnail: previewBytes,
+    contextInfo: {
+      forwardingScore: 2,
+      externalAdReply: { sourceUrl: contextUrl, title: 'Tarjeta contextual', thumbnail: previewBytes },
+    },
+  } };
+  for (const replacement of [`Nuevo ${nativeUrl}`, `Nuevo ${contextUrl}`]) {
+    const f = fixture(message);
+    await assert.rejects(f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text: replacement }),
+      (error) => error.status === 400, replacement);
+    assert.equal(f.calls.sends.length, 0);
+    assert.equal(f.calls.saved.length, 0);
+  }
+  const f = fixture(message);
+  const before = JSON.stringify(f.saved);
+  const replacement = `Nuevo ${nativeUrl}\n${contextUrl}`;
+  const result = await f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text: replacement });
+  assert.equal(result.message.conversation, replacement);
+  assert.equal(f.calls.generated[0].extendedTextMessage.matchedText, nativeUrl);
+  assert.equal(f.calls.generated[0].extendedTextMessage.title, 'Tarjeta nativa');
+  assert.equal(result.contextInfo.externalAdReply.sourceUrl, contextUrl);
+  assert.equal(result.contextInfo.externalAdReply.title, 'Tarjeta contextual');
+  assert.equal(result.contextInfo.forwardingScore, 3);
+  assert.equal(JSON.stringify(f.saved), before);
+});
+
+test('changing text rejects URL cards without an exact original URL token in both original and replacement text', async () => {
+  const url = 'https://example.test/noticia';
+  const cases = [
+    { replacement: 'Texto sin enlace' },
+    { replacement: 'Texto https://example.test/otra-noticia' },
+    { replacement: `Texto ${url}/otra` },
+    { replacement: `Texto ${url}?redirect=otro` },
+    { replacement: `Texto ${url}#otra` },
+    { replacement: `Texto https://evil.test/${url}` },
+    { replacement: `Texto prefijo${url}` },
+    { replacement: `Texto (${url})` },
+    { replacement: `Texto ${url}.` },
+    { originalText: 'Original sin enlace', replacement: `Nuevo ${url}` },
+    { originalText: `Original ${url}/otra`, replacement: `Nuevo ${url}` },
+    { cardUrl: '', replacement: `Nuevo ${url}` },
+    { cardUrl: null, replacement: `Nuevo ${url}` },
+  ];
+  for (const previewType of ['ordinary', 'externalAdReply']) {
+    for (const item of cases) {
+      const cardUrl = Object.hasOwn(item, 'cardUrl') ? item.cardUrl : url;
+      const sourceText = item.originalText || `Original ${url}`;
+      const f = previewType === 'ordinary'
+        ? fixture({ extendedTextMessage: { text: sourceText, matchedText: cardUrl, title: 'Original card', jpegThumbnail: previewBytes } })
+        : fixture({ conversation: sourceText }, { contextInfo: { externalAdReply: { sourceUrl: cardUrl, title: 'Original card', thumbnail: previewBytes } } });
+      const before = JSON.stringify(f.saved);
+      await assert.rejects(f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text: item.replacement }),
+        (error) => error.status === 400, `${previewType}: ${JSON.stringify(item)}`);
+      assert.equal(f.calls.sends.length, 0);
+      assert.equal(f.calls.generated.length, 0);
+      assert.equal(f.calls.saved.length, 0);
+      assert.equal(f.calls.webhooks.length, 0);
+      assert.equal(JSON.stringify(f.saved), before);
+    }
+  }
+});
+
+test('supplying unchanged text preserves R2 forwarding for cards that lack a URL', async () => {
+  const text = 'Texto original sin URL visible';
+  for (const message of [
+    { extendedTextMessage: { text, title: 'Tarjeta sin matchedText', jpegThumbnail: previewBytes } },
+    { conversation: text },
+  ]) {
+    const f = fixture(message, { contextInfo: { externalAdReply: { title: 'Tarjeta sin sourceUrl', thumbnail: previewBytes } } });
+    const before = JSON.stringify(f.saved);
+    const result = await f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text });
+    assert.equal(result.message.conversation, text);
+    assert.equal(f.calls.sends.length, 1);
+    if (message.extendedTextMessage) {
+      assert.equal(f.calls.generated[0].extendedTextMessage.title, message.extendedTextMessage.title);
+      assert.deepEqual(Buffer.from(f.calls.generated[0].extendedTextMessage.jpegThumbnail), previewBytes);
+    } else {
+      assert.equal(result.contextInfo.externalAdReply.title, 'Tarjeta sin sourceUrl');
+      assert.deepEqual(Buffer.from(result.contextInfo.externalAdReply.thumbnail), previewBytes);
+    }
+    assert.equal(JSON.stringify(f.saved), before);
+  }
+});
+
+test('replacement text is rejected for every supported non-text content type before any send', async () => {
+  const contents = {
+    imageMessage: { caption: 'Imagen', mimetype: 'image/jpeg' },
+    videoMessage: { caption: 'Video', mimetype: 'video/mp4' },
+    audioMessage: { mimetype: 'audio/ogg' },
+    ptvMessage: { mimetype: 'video/mp4' },
+    documentMessage: { fileName: 'test.pdf', mimetype: 'application/pdf' },
+    stickerMessage: { mimetype: 'image/webp' },
+    contactMessage: { displayName: 'Test', vcard: 'BEGIN:VCARD\nFN:Test\nEND:VCARD' },
+    contactsArrayMessage: { contacts: [] },
+    locationMessage: { degreesLatitude: 19.4, degreesLongitude: -99.1 },
+  };
+  for (const [type, content] of Object.entries(contents)) {
+    const f = fixture({ [type]: content });
+    const before = JSON.stringify(f.saved);
+    await assert.rejects(f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text: 'No es un caption' }),
+      (error) => error.status === 400, type);
+    assert.equal(f.calls.sends.length, 0, type);
+    assert.equal(f.calls.saved.length, 0, type);
+    assert.equal(f.calls.webhooks.length, 0, type);
+    assert.equal(JSON.stringify(f.saved), before, type);
+  }
+});
+
+test('replacement text cannot resurrect a stale storage preview by matching its previous text', async () => {
+  const f = fixture();
+  await storeReceivedPreview(f);
+  const obsoleteText = f.saved.message.conversation;
+  f.saved.message.conversation = 'Texto actual https://example.test/otra-noticia';
+  const before = JSON.stringify(f.saved);
+  const result = await f.service.forwardMessage({ number: '14155550002', messageId: '3EB0ORIGINAL', text: obsoleteText });
+  const forwarded = f.calls.sends[0].content.forward.message;
+  assert.equal(result.message.conversation, obsoleteText);
+  assert.equal(forwarded[previewSidecar], undefined);
+  assert.equal(forwarded.extendedTextMessage?.title == null, true);
+  assert.equal(forwarded.extendedTextMessage?.jpegThumbnail?.length ?? 0, 0);
+  assert.equal(f.calls.saved.at(-1).message[previewSidecar], undefined);
+  assert.equal(JSON.stringify(f.saved), before);
+});
+
+test('a failed modified forward leaves the stored original card and text untouched', async () => {
+  const f = fixture();
+  await storeReceivedPreview(f);
+  const before = JSON.stringify(f.saved);
+  f.service.client.sendMessage = async () => { throw new Error('Modified forward transport failure'); };
+  await assert.rejects(f.service.forwardMessage({
+    number: '14155550002', messageId: '3EB0ORIGINAL', text: 'Nuevo texto https://example.test/noticia',
+  }), (error) => error.status === 400 && JSON.stringify(error).includes('Modified forward transport failure'));
+  assert.equal(f.calls.saved.length, 1);
+  assert.equal(f.calls.webhooks.length, 0);
+  assert.equal(JSON.stringify(f.saved), before);
 });
 
 test('group forwarding uses the instance-scoped parameterized lookup and normal persistence/webhook', async () => {
@@ -725,8 +982,11 @@ test('HTTP route enforces API-key auth, strict schema, and blocks query retarget
     assert.equal((await request('', 'other-test-token')).status, 401);
     assert.equal((await request('?instanceName=other', 'allowed-test-token')).status, 400);
     assert.equal((await request('?instanceId=other', 'allowed-test-token')).status, 400);
-    assert.equal((await request('', 'allowed-test-token', { ...body, text: 'extra' })).status, 400);
+    assert.equal((await request('', 'allowed-test-token', { ...body, caption: 'extra' })).status, 400);
     assert.equal((await request('', 'allowed-test-token', { ...body, number: 'status@broadcast' })).status, 400);
+    for (const text of [null, 123, true, {}, [], '', ' \n\t ', 'x'.repeat(65537)]) {
+      assert.equal((await request('', 'allowed-test-token', { ...body, text })).status, 400);
+    }
     assert.equal(calls.length, 0);
     const response = await request('', 'allowed-test-token');
     assert.equal(response.status, 201);
@@ -734,6 +994,15 @@ test('HTTP route enforces API-key auth, strict schema, and blocks query retarget
     assert.equal(calls.length, 1);
     assert.equal(calls[0].number, body.number);
     assert.equal(calls[0].messageId, body.messageId);
+    assert.equal(calls[0].text, undefined);
+    const replacement = 'Texto nuevo https://example.test/noticia';
+    const modified = await request('', 'allowed-test-token', { ...body, text: replacement });
+    assert.equal(modified.status, 201);
+    assert.equal((await modified.json()).key.id, 'forwarded');
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].number, body.number);
+    assert.equal(calls[1].messageId, body.messageId);
+    assert.equal(calls[1].text, replacement);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

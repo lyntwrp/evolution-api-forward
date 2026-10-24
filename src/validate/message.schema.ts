@@ -37,6 +37,7 @@ export const forwardMessageSchema: JSONSchema7 = {
       pattern: '^(?:[0-9]{1,17}|[0-9]+(?:-[0-9]+)?@g\\.us|[0-9]+@s\\.whatsapp\\.net)$',
     },
     messageId: { type: 'string', minLength: 1, maxLength: 200, pattern: '^\\S+$' },
+    text: { type: 'string', minLength: 1, maxLength: 65536, pattern: '\\S' },
   },
   required: ['number', 'messageId'],
 };

@@ -1,5 +1,11 @@
 # Endpoint forwardMessage y n8n
 
+**Rama experimental `test/forward-r2-edit-text`:** admite también el campo
+opcional `text` para sustituir el texto de la copia reenviada manteniendo el mismo
+enlace de la tarjeta. Consulta [el contrato y la prueba](forward-message-edit-text-test.es.md).
+La documentación siguiente describe el contrato base de R2, que sigue funcionando
+sin ese campo. El tag estable R2 no incorpora esta ampliación.
+
 ## Contrato
 
 `POST https://TU-DOMINIO-DE-PRUEBAS/message/forwardMessage/{instanceName}`
